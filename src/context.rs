@@ -202,6 +202,14 @@ impl FtdiDevice {
         // Determine max packet size from descriptors
         let max_packet_size = determine_max_packet_size(&device, chip_type, config.interface_num);
 
+        // The proprietary FTDI driver uses index=0 for single-channel
+        // chips and interface_num+1 for multi-channel chips.
+        let usb_index = if chip_type.is_multi_channel() {
+            config.usb_index
+        } else {
+            0
+        };
+
         let mut ftdi = Self {
             device,
             interface,
@@ -220,7 +228,7 @@ impl FtdiDevice {
             writebuffer_chunksize: DEFAULT_CHUNKSIZE,
             max_packet_size,
             interface_num: config.interface_num,
-            usb_index: config.usb_index,
+            usb_index,
             write_ep: config.write_ep,
             read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
@@ -317,6 +325,13 @@ impl FtdiDevice {
 
         let max_packet_size = determine_max_packet_size(&device, chip_type, config.interface_num);
 
+        // Match proprietary driver: index=0 for single-channel, interface+1 for multi.
+        let usb_index = if chip_type.is_multi_channel() {
+            config.usb_index
+        } else {
+            0
+        };
+
         let mut ftdi = Self {
             device,
             interface,
@@ -335,7 +350,7 @@ impl FtdiDevice {
             writebuffer_chunksize: DEFAULT_CHUNKSIZE,
             max_packet_size,
             interface_num: config.interface_num,
-            usb_index: config.usb_index,
+            usb_index,
             write_ep: config.write_ep,
             read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
@@ -474,9 +489,14 @@ impl FtdiDevice {
     ///
     /// This resets the device to its default state. The internal read buffer
     /// is invalidated.
+    ///
+    /// The proprietary FTDI driver sends this with `index=0` (a full
+    /// device reset, not interface-specific), which we replicate here.
     #[maybe_async]
     pub async fn usb_reset(&mut self) -> Result<()> {
-        self.control_out(SIO_RESET_REQUEST, SIO_RESET_SIO, self.usb_index)
+        // The proprietary driver always uses index=0 for a full device reset,
+        // not the interface-specific index.
+        self.control_out(SIO_RESET_REQUEST, SIO_RESET_SIO, 0)
             .await?;
         self.readbuffer_offset = 0;
         self.readbuffer_remaining = 0;
@@ -487,10 +507,18 @@ impl FtdiDevice {
     ///
     /// Clears data in the chip's RX FIFO (data flowing from the serial
     /// device toward the host) and the internal software read buffer.
+    ///
+    /// The purge command is sent 6 times to ensure the FIFO is fully
+    /// drained, matching the behavior of the proprietary FTDI driver.
+    /// This is important for reliable operation in FT245 FIFO mode.
     #[maybe_async]
     pub async fn flush_rx(&mut self) -> Result<()> {
-        self.control_out(SIO_RESET_REQUEST, SIO_TCIFLUSH, self.usb_index)
-            .await?;
+        // The proprietary driver sends the RX purge command 6 times
+        // to ensure reliable FIFO draining.
+        for _ in 0..6 {
+            self.control_out(SIO_RESET_REQUEST, SIO_TCIFLUSH, self.usb_index)
+                .await?;
+        }
         self.readbuffer_offset = 0;
         self.readbuffer_remaining = 0;
         Ok(())
@@ -736,6 +764,10 @@ impl FtdiDevice {
 
 impl FtdiDevice {
     /// Set the latency timer value (1-255 ms).
+    ///
+    /// After setting the latency timer, this function sleeps for
+    /// `min(latency_ms, 50)` ms to allow the device to apply the new
+    /// value, matching the behavior of the proprietary FTDI driver.
     #[maybe_async]
     pub async fn set_latency_timer(&self, latency_ms: u8) -> Result<()> {
         if latency_ms < 1 {
@@ -746,7 +778,15 @@ impl FtdiDevice {
             latency_ms as u16,
             self.usb_index,
         )
-        .await
+        .await?;
+
+        // The proprietary driver sleeps after setting the latency timer
+        // to give the device time to apply the new value:
+        //   usleep(min(latency_ms * 1000, 50000))
+        let sleep_ms = (latency_ms as u64).min(50);
+        crate::sleep_util::sleep(Duration::from_millis(sleep_ms)).await;
+
+        Ok(())
     }
 
     /// Get the current latency timer value in milliseconds.

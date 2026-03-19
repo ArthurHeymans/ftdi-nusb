@@ -34,6 +34,19 @@ impl ChipType {
         matches!(self, Self::Ft2232H | Self::Ft4232H | Self::Ft232H)
     }
 
+    /// Whether this chip has multiple independent interfaces.
+    ///
+    /// Multi-channel chips (FT2232C/H, FT4232H) use a 1-based interface
+    /// index in USB control transfers. Single-channel chips (FT232BM,
+    /// FT245BM, FT232R, FT245R, FT232H, FT230X) use index 0.
+    ///
+    /// This matches the behavior of the proprietary FTDI driver's
+    /// `SetDeviceContext` function.
+    #[inline]
+    pub fn is_multi_channel(self) -> bool {
+        matches!(self, Self::Ft2232C | Self::Ft2232H | Self::Ft4232H)
+    }
+
     /// Default product string for this chip type.
     pub fn default_product_name(self) -> &'static str {
         match self {
@@ -409,6 +422,20 @@ mod tests {
         assert!(!ChipType::Bm.is_h_type());
         assert!(!ChipType::Am.is_h_type());
         assert!(!ChipType::Ft2232C.is_h_type());
+    }
+
+    #[test]
+    fn multi_channel_detection() {
+        // Multi-channel chips
+        assert!(ChipType::Ft2232C.is_multi_channel());
+        assert!(ChipType::Ft2232H.is_multi_channel());
+        assert!(ChipType::Ft4232H.is_multi_channel());
+        // Single-channel chips
+        assert!(!ChipType::Am.is_multi_channel());
+        assert!(!ChipType::Bm.is_multi_channel());
+        assert!(!ChipType::Ft232R.is_multi_channel());
+        assert!(!ChipType::Ft232H.is_multi_channel());
+        assert!(!ChipType::Ft230X.is_multi_channel());
     }
 
     #[test]
