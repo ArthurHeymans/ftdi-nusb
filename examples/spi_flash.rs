@@ -18,11 +18,11 @@
 //! cargo run --example spi_flash
 //! ```
 
-use ftdi::mpsse::spi::{SpiDevice, SpiMode};
-use ftdi::mpsse::MpsseContext;
-use ftdi::FtdiDevice;
+use ftdi_nusb::mpsse::spi::{SpiDevice, SpiMode};
+use ftdi_nusb::mpsse::MpsseContext;
+use ftdi_nusb::FtdiDevice;
 
-fn main() -> Result<(), ftdi::Error> {
+fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
 
     println!("Opening FT232H...");

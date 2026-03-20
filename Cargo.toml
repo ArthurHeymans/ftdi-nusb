@@ -1,11 +1,11 @@
 [package]
-name = "ftdi"
+name = "ftdi-nusb"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 description = "Pure Rust library for communicating with FTDI USB devices, backed by nusb"
-repository = "https://github.com/TODO/ftdi-rs"
+repository = "https://github.com/ArthurHeymans/ftdi-nusb"
 keywords = ["ftdi", "usb", "serial", "mpsse", "bitbang"]
 categories = ["hardware-support", "embedded"]
 
@@ -13,23 +13,13 @@ categories = ["hardware-support", "embedded"]
 default = ["std"]
 std = ["is_sync", "nusb", "thiserror"]
 is_sync = ["maybe-async/is_sync"]
-wasm = ["nusb", "thiserror", "web-sys", "wasm-bindgen", "wasm-bindgen-futures", "js-sys"]
 embedded-hal = ["dep:embedded-hal", "dep:embedded-io"]
 
 [dependencies]
-nusb = { git = "https://github.com/ArthurHeymans/nusb.git", branch = "task/webusb-rebased", optional = true }
+nusb = { version = "0.2", optional = true }
 thiserror = { version = "2", optional = true }
 log = "0.4"
 maybe-async = "0.2"
-
-# WASM dependencies
-web-sys = { version = "0.3", optional = true, features = [
-    "Navigator", "Window", "WorkerGlobalScope", "console",
-    "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions",
-] }
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
 
 embedded-hal = { version = "1.0.0", optional = true }
 embedded-io = { version = "0.7.1", optional = true }

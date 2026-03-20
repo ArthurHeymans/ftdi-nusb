@@ -3,8 +3,8 @@
 //! Uses `proptest` to generate random EEPROM field values and verify that
 //! build() followed by decode() preserves all fields.
 
-use ftdi::eeprom::FtdiEeprom;
-use ftdi::types::ChipType;
+use ftdi_nusb::eeprom::FtdiEeprom;
+use ftdi_nusb::types::ChipType;
 use proptest::prelude::*;
 
 /// Generate a short ASCII string suitable for EEPROM (USB string descriptors
@@ -40,7 +40,7 @@ proptest! {
         eeprom.init_defaults(chip, Some(&manufacturer), Some(&product), Some(&serial));
 
         // Build
-        let result = ftdi::eeprom::build::build(&mut eeprom, chip);
+        let result = ftdi_nusb::eeprom::build::build(&mut eeprom, chip);
         // AM chip doesn't support EEPROM build in many configurations
         if chip == ChipType::Am {
             // AM build may succeed or fail — skip assertion on error
@@ -60,7 +60,7 @@ proptest! {
         // Decode back
         let mut decoded = FtdiEeprom::default();
         decoded.set_raw_buf(&eeprom.buf);
-        let decode_result = ftdi::eeprom::decode::decode(&mut decoded, chip);
+        let decode_result = ftdi_nusb::eeprom::decode::decode(&mut decoded, chip);
 
         // Checksum errors are possible for AM due to simplified build
         if decode_result.is_err() {
@@ -93,7 +93,7 @@ proptest! {
         eeprom.max_power = max_power;
 
         // Should not panic regardless of max_power value
-        let _ = ftdi::eeprom::build::build(&mut eeprom, chip);
+        let _ = ftdi_nusb::eeprom::build::build(&mut eeprom, chip);
     }
 
     /// Test that vendor_id and product_id round-trip for all chip types.
@@ -108,14 +108,14 @@ proptest! {
         eeprom.vendor_id = vid;
         eeprom.product_id = pid;
 
-        let result = ftdi::eeprom::build::build(&mut eeprom, chip);
+        let result = ftdi_nusb::eeprom::build::build(&mut eeprom, chip);
         if result.is_err() {
             return Ok(());
         }
 
         let mut decoded = FtdiEeprom::default();
         decoded.set_raw_buf(&eeprom.buf);
-        if ftdi::eeprom::decode::decode(&mut decoded, chip).is_err() {
+        if ftdi_nusb::eeprom::decode::decode(&mut decoded, chip).is_err() {
             return Ok(());
         }
 

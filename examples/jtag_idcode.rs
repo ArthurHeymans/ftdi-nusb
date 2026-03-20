@@ -18,11 +18,11 @@
 //! cargo run --example jtag_idcode
 //! ```
 
-use ftdi::mpsse::jtag::JtagBus;
-use ftdi::mpsse::MpsseContext;
-use ftdi::FtdiDevice;
+use ftdi_nusb::mpsse::jtag::JtagBus;
+use ftdi_nusb::mpsse::MpsseContext;
+use ftdi_nusb::FtdiDevice;
 
-fn main() -> Result<(), ftdi::Error> {
+fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
 
     println!("Opening FT232H...");

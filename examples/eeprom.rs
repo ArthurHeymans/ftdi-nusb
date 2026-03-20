@@ -5,8 +5,8 @@
 //!
 //! Usage: cargo run --example eeprom
 
-use ftdi::constants::{pid, FTDI_VID};
-use ftdi::FtdiDevice;
+use ftdi_nusb::constants::{pid, FTDI_VID};
+use ftdi_nusb::FtdiDevice;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Serial:       {}", ser.unwrap_or("(none)"));
 
     // Read chip ID (FT232R only)
-    if dev.chip_type() == ftdi::ChipType::Ft232R {
+    if dev.chip_type() == ftdi_nusb::ChipType::Ft232R {
         match dev.read_chipid() {
             Ok(id) => println!("  Chip ID:      0x{id:08X}"),
             Err(e) => println!("  Chip ID:      (error: {e})"),

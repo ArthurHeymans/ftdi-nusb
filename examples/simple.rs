@@ -8,22 +8,22 @@
 use std::io::Read;
 use std::time::Duration;
 
-use ftdi::constants::{pid, FTDI_VID};
+use ftdi_nusb::constants::{pid, FTDI_VID};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     println!("Opening FTDI device...");
-    let mut dev = ftdi::FtdiDevice::open(FTDI_VID, pid::FT232)?;
+    let mut dev = ftdi_nusb::FtdiDevice::open(FTDI_VID, pid::FT232)?;
     println!("Opened: {:?}", dev);
 
     dev.set_baudrate(115200)?;
     dev.set_line_property(
-        ftdi::DataBits::Eight,
-        ftdi::StopBits::One,
-        ftdi::Parity::None,
+        ftdi_nusb::DataBits::Eight,
+        ftdi_nusb::StopBits::One,
+        ftdi_nusb::Parity::None,
     )?;
-    dev.set_flow_control(ftdi::FlowControl::Disabled)?;
+    dev.set_flow_control(ftdi_nusb::FlowControl::Disabled)?;
     println!("Configured: 115200 8N1");
 
     // Write some data

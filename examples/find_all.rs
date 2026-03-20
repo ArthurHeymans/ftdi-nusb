@@ -2,9 +2,9 @@
 //!
 //! Usage: cargo run --example find_all
 
-use ftdi::constants::{pid, FTDI_VID};
+use ftdi_nusb::constants::{pid, FTDI_VID};
 
-fn main() -> Result<(), ftdi::Error> {
+fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
 
     let pids = [
@@ -18,7 +18,7 @@ fn main() -> Result<(), ftdi::Error> {
     let mut found_any = false;
 
     for (name, product_id) in &pids {
-        let devices = ftdi::find_devices(FTDI_VID, *product_id)?;
+        let devices = ftdi_nusb::find_devices(FTDI_VID, *product_id)?;
         for dev in &devices {
             found_any = true;
             #[cfg(target_os = "linux")]

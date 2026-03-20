@@ -17,9 +17,9 @@
 //! cargo run --example i2c_sensor
 //! ```
 
-use ftdi::mpsse::i2c::I2cBus;
-use ftdi::mpsse::MpsseContext;
-use ftdi::FtdiDevice;
+use ftdi_nusb::mpsse::i2c::I2cBus;
+use ftdi_nusb::mpsse::MpsseContext;
+use ftdi_nusb::FtdiDevice;
 
 /// Default TMP102 I2C address (ADD0 = GND).
 const TMP102_ADDR: u8 = 0x48;
@@ -28,7 +28,7 @@ const TMP102_ADDR: u8 = 0x48;
 const REG_TEMPERATURE: u8 = 0x00;
 const REG_CONFIGURATION: u8 = 0x01;
 
-fn main() -> Result<(), ftdi::Error> {
+fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
 
     println!("Opening FT232H...");
