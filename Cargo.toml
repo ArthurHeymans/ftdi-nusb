@@ -13,13 +13,37 @@ categories = ["hardware-support", "embedded"]
 default = ["std"]
 std = ["is_sync", "nusb", "thiserror"]
 is_sync = ["maybe-async/is_sync"]
+wasm = [
+  "nusb",
+  "thiserror",
+  "web-sys",
+  "wasm-bindgen",
+  "wasm-bindgen-futures",
+  "js-sys",
+]
 embedded-hal = ["dep:embedded-hal", "dep:embedded-io"]
 
 [dependencies]
-nusb = { version = "0.2", optional = true }
+nusb = { git = "https://github.com/ArthurHeymans/nusb.git", branch = "task/webusb-rebased", optional = true }
 thiserror = { version = "2", optional = true }
 log = "0.4"
 maybe-async = "0.2"
+
+# WASM / WebUSB dependencies. WebUSB types require building with
+# RUSTFLAGS='--cfg=web_sys_unstable_apis'.
+web-sys = { version = "=0.3.77", optional = true, features = [
+  "Navigator",
+  "Window",
+  "WorkerGlobalScope",
+  "console",
+  "Usb",
+  "UsbDevice",
+  "UsbDeviceFilter",
+  "UsbDeviceRequestOptions",
+] }
+wasm-bindgen = { version = "=0.2.100", optional = true }
+wasm-bindgen-futures = { version = "=0.4.50", optional = true }
+js-sys = { version = "=0.3.77", optional = true }
 
 embedded-hal = { version = "1.0.0", optional = true }
 embedded-io = { version = "0.7.1", optional = true }

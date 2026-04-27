@@ -30,7 +30,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use ftdi::{FtdiDevice, mpsse::{MpsseContext, jtag::JtagBus}};
+//! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, jtag::JtagBus}};
 //!
 //! let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
 //! let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?; // 1 MHz TCK
@@ -43,7 +43,7 @@
 //! jtag.goto_shift_dr(&mut dev)?;
 //! let idcode = jtag.shift_bits(&mpsse, &mut dev, &[0; 4], 32, true)?;
 //! jtag.goto_idle(&mut dev)?;
-//! # Ok::<(), ftdi::Error>(())
+//! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
 use maybe_async::maybe_async;

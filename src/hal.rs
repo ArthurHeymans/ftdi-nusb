@@ -100,8 +100,8 @@ impl embedded_io::Write for FtdiDevice {
 /// # Example
 ///
 /// ```no_run
-/// use ftdi::{FtdiDevice, hal::FtdiSpiDevice};
-/// use ftdi::mpsse::spi::SpiMode;
+/// use ftdi_nusb::{FtdiDevice, hal::FtdiSpiDevice};
+/// use ftdi_nusb::mpsse::spi::SpiMode;
 ///
 /// let mut hal_spi = FtdiSpiDevice::open(0x0403, 0x6014, 1_000_000, SpiMode::Mode0)?;
 ///
@@ -109,7 +109,7 @@ impl embedded_io::Write for FtdiDevice {
 /// use embedded_hal::spi::SpiDevice;
 /// let mut buf = [0u8; 4];
 /// hal_spi.transfer(&mut buf, &[0x9F, 0, 0, 0])?;
-/// # Ok::<(), ftdi::Error>(())
+/// # Ok::<(), ftdi_nusb::Error>(())
 /// ```
 pub struct FtdiSpiDevice {
     dev: FtdiDevice,
@@ -222,7 +222,7 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
 /// # Example
 ///
 /// ```no_run
-/// use ftdi::hal::FtdiI2c;
+/// use ftdi_nusb::hal::FtdiI2c;
 ///
 /// let mut hal_i2c = FtdiI2c::open(0x0403, 0x6014, 100_000)?;
 ///
@@ -230,7 +230,7 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
 /// use embedded_hal::i2c::I2c;
 /// let mut buf = [0u8; 2];
 /// hal_i2c.write_read(0x48, &[0x00], &mut buf)?;
-/// # Ok::<(), ftdi::Error>(())
+/// # Ok::<(), ftdi_nusb::Error>(())
 /// ```
 pub struct FtdiI2c {
     dev: FtdiDevice,

@@ -68,12 +68,12 @@ macro_rules! nusb_await {
 /// # Opening a device
 ///
 /// ```no_run
-/// use ftdi::FtdiDevice;
+/// use ftdi_nusb::FtdiDevice;
 ///
 /// let mut dev = FtdiDevice::open(0x0403, 0x6001)?;
 /// dev.set_baudrate(115200)?;
 /// dev.write_all(b"Hello FTDI!\r\n")?;
-/// # Ok::<(), ftdi::Error>(())
+/// # Ok::<(), ftdi_nusb::Error>(())
 /// ```
 ///
 /// # Implements `Read` and `Write`
@@ -110,8 +110,10 @@ pub struct FtdiDevice {
     max_packet_size: usize,
     interface_num: u8,
     usb_index: u16,
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
     write_ep: u8, // bulk OUT endpoint address
-    read_ep: u8,  // bulk IN endpoint address
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    read_ep: u8, // bulk IN endpoint address
 
     // EEPROM
     pub(crate) eeprom: FtdiEeprom,
@@ -244,6 +246,138 @@ impl FtdiDevice {
     }
 }
 
+// ---- WASM-only construction ----
+
+#[cfg(all(feature = "wasm", not(feature = "is_sync")))]
+impl FtdiDevice {
+    /// Show the browser's WebUSB device picker filtered by common FTDI VID/PIDs.
+    ///
+    /// Returns a [`nusb::DeviceInfo`] that can be passed to
+    /// [`open_wasm`](Self::open_wasm).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_device() -> Result<nusb::DeviceInfo> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions};
+
+        let usb = web_sys::window()
+            .ok_or(Error::DeviceNotFound)?
+            .navigator()
+            .usb();
+
+        let filters = js_sys::Array::new();
+
+        // Common FTDI PIDs.
+        let pids: &[u16] = &[
+            0x6001, // FT232
+            0x6010, // FT2232
+            0x6011, // FT4232
+            0x6014, // FT232H
+            0x6015, // FT230X
+        ];
+
+        for &pid in pids {
+            let filter = UsbDeviceFilter::new();
+            filter.set_vendor_id(FTDI_VID);
+            filter.set_product_id(pid);
+            filters.push(&filter);
+        }
+
+        let options = UsbDeviceRequestOptions::new(&filters);
+
+        let device_promise = usb.request_device(&options);
+        let device_js = JsFuture::from(device_promise)
+            .await
+            .map_err(|e| Error::OpenFailed(format!("WebUSB request failed: {:?}", e)))?;
+
+        let device: UsbDevice = device_js
+            .dyn_into()
+            .map_err(|_| Error::OpenFailed("failed to get USB device".to_string()))?;
+
+        nusb::device_info_from_webusb(device)
+            .await
+            .map_err(|e| Error::OpenFailed(format!("failed to get device info: {e}")))
+    }
+
+    /// Open an FTDI device from a [`nusb::DeviceInfo`] in a WASM/WebUSB build.
+    pub async fn open_wasm(dev_info: nusb::DeviceInfo, iface: Interface) -> Result<Self> {
+        let config = iface.config();
+
+        let device = dev_info.open().await.map_err(Error::Usb)?;
+
+        let interface = device
+            .claim_interface(config.interface_num)
+            .await
+            .map_err(Error::Usb)?;
+
+        let write_endpoint = interface
+            .endpoint::<nusb::transfer::Bulk, nusb::transfer::Out>(config.write_ep)
+            .map_err(Error::Usb)?;
+        let read_endpoint = interface
+            .endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(config.read_ep)
+            .map_err(Error::Usb)?;
+
+        // Auto-detect chip type from bcdDevice.
+        let desc = device.device_descriptor();
+        let bcd = desc.device_version();
+        let has_serial = desc.serial_number_string_index().is_some();
+
+        let chip_type = detect_chip_type(bcd, has_serial);
+
+        // Determine max packet size from descriptors.
+        let max_packet_size = determine_max_packet_size(&device, chip_type, config.interface_num);
+
+        // The proprietary FTDI driver uses index=0 for single-channel
+        // chips and interface_num+1 for multi-channel chips.
+        let usb_index = if chip_type.is_multi_channel() {
+            config.usb_index
+        } else {
+            0
+        };
+
+        let mut ftdi = Self {
+            device,
+            interface,
+            write_endpoint,
+            read_endpoint,
+            chip_type,
+            baudrate: 0,
+            bitbang_enabled: false,
+            bitbang_mode: BitMode::Reset,
+            read_timeout: DEFAULT_TIMEOUT,
+            write_timeout: DEFAULT_TIMEOUT,
+            readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
+            readbuffer_offset: 0,
+            readbuffer_remaining: 0,
+            readbuffer_chunksize: DEFAULT_CHUNKSIZE,
+            writebuffer_chunksize: DEFAULT_CHUNKSIZE,
+            max_packet_size,
+            interface_num: config.interface_num,
+            usb_index,
+            write_ep: config.write_ep,
+            read_ep: config.read_ep,
+            eeprom: FtdiEeprom::default(),
+        };
+
+        // Reset device.
+        ftdi.usb_reset().await?;
+
+        // Set default baud rate.
+        ftdi.set_baudrate(9600).await?;
+
+        Ok(ftdi)
+    }
+
+    /// Async shutdown — WASM equivalent of Drop.
+    ///
+    /// Should be called before the device is dropped in WASM, since async Drop
+    /// is not available in Rust.
+    pub async fn shutdown(&mut self) {
+        // Best-effort cleanup.
+        let _ = self.flush_all().await;
+    }
+}
+
 // ---- Accessors (always available) ----
 
 impl FtdiDevice {
@@ -269,6 +403,7 @@ impl FtdiDevice {
     /// Open the bulk IN endpoint (device -> host) for reading.
     ///
     /// This is used by the streaming and async modules and should not be called directly.
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
     pub(crate) fn bulk_in_endpoint(
         &self,
     ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>> {
@@ -280,6 +415,7 @@ impl FtdiDevice {
     /// Open the bulk OUT endpoint (host -> device) for writing.
     ///
     /// This is used by the async module and should not be called directly.
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
     pub(crate) fn bulk_out_endpoint(
         &self,
     ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>> {
@@ -289,16 +425,19 @@ impl FtdiDevice {
     }
 
     /// Get the write buffer chunk size (for internal use by async module).
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
     pub(crate) fn writebuffer_chunksize(&self) -> usize {
         self.writebuffer_chunksize
     }
 
     /// Get the read buffer chunk size (for internal use by async module).
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
     pub(crate) fn readbuffer_chunksize(&self) -> usize {
         self.readbuffer_chunksize
     }
 
     /// Drain up to `n` bytes from the internal read buffer (for async module).
+    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
     pub(crate) fn drain_readbuffer(&mut self, max: usize) -> Vec<u8> {
         let n = self.readbuffer_remaining.min(max);
         if n == 0 {

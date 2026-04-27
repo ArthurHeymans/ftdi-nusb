@@ -10,7 +10,7 @@
 //! # Usage
 //!
 //! ```no_run
-//! use ftdi::FtdiDevice;
+//! use ftdi_nusb::FtdiDevice;
 //!
 //! let mut dev = FtdiDevice::open(0x0403, 0x6001)?;
 //! dev.set_baudrate(115200)?;
@@ -22,7 +22,7 @@
 //!
 //! // Wait for the transfer to complete
 //! let bytes_written = tc.done()?;
-//! # Ok::<(), ftdi::Error>(())
+//! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
 use std::time::Duration;
@@ -319,13 +319,13 @@ impl FtdiDevice {
     /// # Example
     ///
     /// ```no_run
-    /// # use ftdi::FtdiDevice;
+    /// # use ftdi_nusb::FtdiDevice;
     /// # let mut dev = FtdiDevice::open(0x0403, 0x6001)?;
     /// let tc = dev.write_data_submit(b"MPSSE commands here")?;
     /// // ... do other work ...
     /// let n = tc.done()?;
     /// println!("Wrote {n} bytes");
-    /// # Ok::<(), ftdi::Error>(())
+    /// # Ok::<(), ftdi_nusb::Error>(())
     /// ```
     pub fn write_data_submit(&mut self, data: &[u8]) -> Result<WriteTransferControl> {
         let ep = self.bulk_out_endpoint()?;
@@ -361,13 +361,13 @@ impl FtdiDevice {
     /// # Example
     ///
     /// ```no_run
-    /// # use ftdi::FtdiDevice;
+    /// # use ftdi_nusb::FtdiDevice;
     /// # let mut dev = FtdiDevice::open(0x0403, 0x6001)?;
     /// let tc = dev.read_data_submit(64)?;
     /// // ... do other work ...
     /// let data = tc.done()?;
     /// println!("Read {} bytes", data.len());
-    /// # Ok::<(), ftdi::Error>(())
+    /// # Ok::<(), ftdi_nusb::Error>(())
     /// ```
     pub fn read_data_submit(&mut self, size: usize) -> Result<ReadTransferControl> {
         let pkt_size = self.max_packet_size();

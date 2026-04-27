@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use ftdi::{FtdiDevice, mpsse::{MpsseContext, gpio::{GpioPin, GpioBank}}};
+//! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, gpio::{GpioPin, GpioBank}}};
 //!
 //! let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
 //! let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
@@ -28,7 +28,7 @@
 //!
 //! // Set as input
 //! pin.set_input(&mut mpsse, &mut dev)?;
-//! # Ok::<(), ftdi::Error>(())
+//! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
 use maybe_async::maybe_async;
