@@ -144,9 +144,8 @@ handles this automatically via nusb's `detach_and_claim_interface()`.
 
 ## WASM / WebUSB Support
 
-The `wasm` feature builds for `wasm32-unknown-unknown` with WebUSB support.
-This uses an out-of-tree nusb branch with WebUSB support:
-`https://github.com/ArthurHeymans/nusb.git`, branch `task/webusb-rebased`.
+The `wasm` feature builds for `wasm32-unknown-unknown` with WebUSB support,
+using the WebUSB backend included in upstream nusb.
 
 Build with default features disabled so the synchronous `std`/`is_sync` API is
 not enabled:
@@ -167,8 +166,8 @@ picker. Use the async WASM constructors instead of native device discovery:
 use ftdi_nusb::{FtdiDevice, Interface};
 
 # async fn example() -> ftdi_nusb::Result<()> {
-let dev_info = FtdiDevice::request_device().await?;
-let mut dev = FtdiDevice::open_wasm(dev_info, Interface::A).await?;
+let device = FtdiDevice::request_device().await?;
+let mut dev = FtdiDevice::open_wasm(device, Interface::A).await?;
 
 dev.set_baudrate(115_200).await?;
 dev.write_all(b"Hello from WebUSB!\r\n").await?;

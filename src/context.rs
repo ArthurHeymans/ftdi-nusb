@@ -252,10 +252,10 @@ impl FtdiDevice {
 impl FtdiDevice {
     /// Show the browser's WebUSB device picker filtered by common FTDI VID/PIDs.
     ///
-    /// Returns a [`nusb::DeviceInfo`] that can be passed to
+    /// Returns an open [`nusb::Device`] that can be passed to
     /// [`open_wasm`](Self::open_wasm).
     #[cfg(target_arch = "wasm32")]
-    pub async fn request_device() -> Result<nusb::DeviceInfo> {
+    pub async fn request_device() -> Result<nusb::Device> {
         use wasm_bindgen::JsCast;
         use wasm_bindgen_futures::JsFuture;
         use web_sys::{UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions};
@@ -265,7 +265,7 @@ impl FtdiDevice {
             .navigator()
             .usb();
 
-        let filters = js_sys::Array::new();
+        let mut filters = Vec::new();
 
         // Common FTDI PIDs.
         let pids: &[u16] = &[
@@ -280,7 +280,7 @@ impl FtdiDevice {
             let filter = UsbDeviceFilter::new();
             filter.set_vendor_id(FTDI_VID);
             filter.set_product_id(pid);
-            filters.push(&filter);
+            filters.push(filter);
         }
 
         let options = UsbDeviceRequestOptions::new(&filters);
@@ -294,16 +294,14 @@ impl FtdiDevice {
             .dyn_into()
             .map_err(|_| Error::OpenFailed("failed to get USB device".to_string()))?;
 
-        nusb::device_info_from_webusb(device)
+        nusb::Device::from_js(device)
             .await
-            .map_err(|e| Error::OpenFailed(format!("failed to get device info: {e}")))
+            .map_err(|e| Error::OpenFailed(format!("failed to open WebUSB device: {e}")))
     }
 
-    /// Open an FTDI device from a [`nusb::DeviceInfo`] in a WASM/WebUSB build.
-    pub async fn open_wasm(dev_info: nusb::DeviceInfo, iface: Interface) -> Result<Self> {
+    /// Initialize an FTDI device from an open [`nusb::Device`] in a WASM/WebUSB build.
+    pub async fn open_wasm(device: nusb::Device, iface: Interface) -> Result<Self> {
         let config = iface.config();
-
-        let device = dev_info.open().await.map_err(Error::Usb)?;
 
         let interface = device
             .claim_interface(config.interface_num)
