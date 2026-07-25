@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use ftdi::{FtdiDevice, mpsse::{MpsseContext, spi::{SpiDevice, SpiMode}}};
+//! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, spi::{SpiDevice, SpiMode}}};
 //!
 //! let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
 //! let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
@@ -30,7 +30,7 @@
 //!
 //! // Read-only
 //! let data = spi.read(&mut mpsse, &mut dev, 4)?;
-//! # Ok::<(), ftdi::Error>(())
+//! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
 use maybe_async::maybe_async;

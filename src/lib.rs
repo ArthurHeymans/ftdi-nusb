@@ -34,30 +34,67 @@
 //! - **`Read` / `Write` traits**: Use `FtdiDevice` anywhere `std::io::Read`
 //!   or `std::io::Write` is expected.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", feature = "wasm")), no_std)]
 
 // Always available (pure computation)
 mod baudrate;
 pub mod constants;
 
-/// Internal sleep helper (synchronous).
-#[cfg(feature = "std")]
+/// Internal platform-aware sleep helper.
+///
+/// In sync mode, uses `std::thread::sleep`. In WASM async mode, uses
+/// `setTimeout` via a JS Promise. Works in both Window and Worker contexts.
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub(crate) mod sleep_util {
     use core::time::Duration;
 
-    /// Sleep for the given duration, blocking the thread.
+    /// Sleep for the given duration.
+    ///
+    /// - Sync (`is_sync`): blocks the thread with `std::thread::sleep`.
+    /// - Async (WASM): yields via a `setTimeout` Promise.
     #[maybe_async::maybe_async]
     pub(crate) async fn sleep(duration: Duration) {
-        std::thread::sleep(duration);
+        let _ = duration;
+
+        #[cfg(feature = "is_sync")]
+        {
+            std::thread::sleep(duration);
+        }
+
+        #[cfg(all(feature = "wasm", not(feature = "is_sync")))]
+        {
+            use wasm_bindgen::JsCast;
+
+            let delay_ms = duration.as_millis() as i32;
+            if delay_ms > 0 {
+                let promise = js_sys::Promise::new(&mut |resolve, _| {
+                    if let Some(window) = web_sys::window() {
+                        window
+                            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                &resolve, delay_ms,
+                            )
+                            .unwrap();
+                    } else {
+                        let global: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
+                        global
+                            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                &resolve, delay_ms,
+                            )
+                            .unwrap();
+                    }
+                });
+                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+            }
+        }
     }
 }
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod context;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod eeprom;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod error;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod mpsse;
 pub mod types;
 
@@ -74,11 +111,11 @@ pub mod stream;
 // ---- Convenience re-exports ----
 
 pub use constants::FTDI_VID;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub use context::FtdiDevice;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub use eeprom::FtdiEeprom;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", feature = "wasm"))]
 pub use error::{Error, Result};
 pub use types::*;
 

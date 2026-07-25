@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use ftdi::{FtdiDevice, mpsse::{MpsseContext, i2c::I2cBus}};
+//! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, i2c::I2cBus}};
 //!
 //! let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
 //! let mut mpsse = MpsseContext::init(&mut dev, 100_000)?; // 100 kHz I2C
@@ -29,7 +29,7 @@
 //!
 //! // Read 2 bytes from device at address 0x50
 //! let data = i2c.read(&mut mpsse, &mut dev, 0x50, 2)?;
-//! # Ok::<(), ftdi::Error>(())
+//! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
 use maybe_async::maybe_async;

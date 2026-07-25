@@ -137,9 +137,43 @@ Requires a platform supported by [nusb](https://docs.rs/nusb):
 - **Linux** — via usbfs (no root required with proper udev rules)
 - **macOS** — via IOKit
 - **Windows** — via WinUSB
+- **WebAssembly** — via WebUSB in Chromium-based browsers
 
 On Linux, you may need to detach the `ftdi_sio` kernel driver. The library
 handles this automatically via nusb's `detach_and_claim_interface()`.
+
+## WASM / WebUSB Support
+
+The `wasm` feature builds for `wasm32-unknown-unknown` with WebUSB support,
+using the WebUSB backend included in upstream nusb.
+
+Build with default features disabled so the synchronous `std`/`is_sync` API is
+not enabled:
+
+```sh
+rustup target add wasm32-unknown-unknown
+RUSTFLAGS='--cfg=web_sys_unstable_apis' \
+  cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
+```
+
+The `web_sys_unstable_apis` cfg is required because WebUSB bindings are still
+marked unstable in `web-sys`.
+
+On WASM, browser security requires a user gesture to open the WebUSB device
+picker. Use the async WASM constructors instead of native device discovery:
+
+```rust,no_run
+use ftdi_nusb::{FtdiDevice, Interface};
+
+# async fn example() -> ftdi_nusb::Result<()> {
+let device = FtdiDevice::request_device().await?;
+let mut dev = FtdiDevice::open_wasm(device, Interface::A).await?;
+
+dev.set_baudrate(115_200).await?;
+dev.write_all(b"Hello from WebUSB!\r\n").await?;
+# Ok(())
+# }
+```
 
 ## Feature Flags
 
@@ -147,6 +181,7 @@ handles this automatically via nusb's `detach_and_claim_interface()`.
 |----------------|--------------------------------------------------------|
 | `std` (default)| Native synchronous build (Linux/macOS/Windows)         |
 | `is_sync`      | Enabled automatically by `std`; makes all I/O blocking |
+| `wasm`         | Async WASM/WebUSB build                                |
 | `embedded-hal` | `embedded-hal` trait implementations                   |
 
 ## License

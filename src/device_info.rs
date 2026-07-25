@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 /// # Example
 ///
 /// ```no_run
-/// use ftdi::DeviceFilter;
+/// use ftdi_nusb::DeviceFilter;
 ///
 /// let filter = DeviceFilter::new(0x0403, 0x6001)
 ///     .serial("FT123456")
@@ -77,7 +77,7 @@ const STRING_TIMEOUT: Duration = Duration::from_secs(1);
 /// # Example
 ///
 /// ```no_run
-/// use ftdi::{find_devices, constants::FTDI_VID};
+/// use ftdi_nusb::{find_devices, constants::FTDI_VID};
 ///
 /// let devices = find_devices(FTDI_VID, 0x6001).unwrap();
 /// for dev in &devices {
