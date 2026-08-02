@@ -20,9 +20,9 @@
 
 use crate::context::FtdiDevice;
 use crate::error::Error;
+use crate::mpsse::MpsseContext;
 use crate::mpsse::i2c::I2cBus;
 use crate::mpsse::spi::{SpiDevice, SpiMode};
-use crate::mpsse::MpsseContext;
 
 // ---- Error conversion ----
 

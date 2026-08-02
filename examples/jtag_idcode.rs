@@ -18,9 +18,9 @@
 //! cargo run --example jtag_idcode
 //! ```
 
-use ftdi_nusb::mpsse::jtag::JtagBus;
-use ftdi_nusb::mpsse::MpsseContext;
 use ftdi_nusb::FtdiDevice;
+use ftdi_nusb::mpsse::MpsseContext;
+use ftdi_nusb::mpsse::jtag::JtagBus;
 
 fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();

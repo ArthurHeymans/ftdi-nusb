@@ -3,8 +3,8 @@
 use crate::error::{Error, Result};
 use crate::types::ChipType;
 
-use super::build::checksum;
 use super::FtdiEeprom;
+use super::build::checksum;
 
 /// Decode a string descriptor from the EEPROM buffer.
 ///

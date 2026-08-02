@@ -304,7 +304,7 @@ impl JtagBus {
                 mpsse::WRITE_TMS | mpsse::DO_READ | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB,
             );
             cmd.push(0); // 1 bit
-                         // bit 0 = TMS value (1 = exit), bit 7 = TDI value
+            // bit 0 = TMS value (1 = exit), bit 7 = TDI value
             cmd.push(0x01 | (last_tdi_bit << 7));
 
             self.state = match self.state {

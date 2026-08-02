@@ -8,7 +8,7 @@
 use std::thread;
 use std::time::Duration;
 
-use ftdi_nusb::constants::{pid, FTDI_VID};
+use ftdi_nusb::constants::{FTDI_VID, pid};
 use ftdi_nusb::{BitMode, FtdiDevice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

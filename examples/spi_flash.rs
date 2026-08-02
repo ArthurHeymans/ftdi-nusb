@@ -18,9 +18,9 @@
 //! cargo run --example spi_flash
 //! ```
 
-use ftdi_nusb::mpsse::spi::{SpiDevice, SpiMode};
-use ftdi_nusb::mpsse::MpsseContext;
 use ftdi_nusb::FtdiDevice;
+use ftdi_nusb::mpsse::MpsseContext;
+use ftdi_nusb::mpsse::spi::{SpiDevice, SpiMode};
 
 fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();

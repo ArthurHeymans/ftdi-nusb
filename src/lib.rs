@@ -122,6 +122,6 @@ pub use types::*;
 #[cfg(feature = "std")]
 pub use async_transfer::{ReadTransferControl, WriteTransferControl};
 #[cfg(feature = "std")]
-pub use device_info::{find_device, find_devices, DeviceFilter};
+pub use device_info::{DeviceFilter, find_device, find_devices};
 #[cfg(feature = "std")]
 pub use stream::StreamProgress;

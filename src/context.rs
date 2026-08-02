@@ -6,9 +6,9 @@
 
 use core::time::Duration;
 
-use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 #[cfg(feature = "is_sync")]
 use nusb::MaybeFuture;
+use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 
 use maybe_async::maybe_async;
 
