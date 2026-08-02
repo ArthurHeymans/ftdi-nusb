@@ -43,6 +43,21 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features embedded-hal -- -D warnings
 
+  wasm:
+    name: WASM (wasm32-unknown-unknown)
+    runs-on: ubuntu-latest
+    # WebUSB bindings require the unstable web_sys APIs cfg.
+    env:
+      RUSTFLAGS: --cfg=web_sys_unstable_apis -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - run: cargo check --target wasm32-unknown-unknown --no-default-features --features wasm
+      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features wasm --lib -- -D warnings
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

@@ -5,9 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-02
 
 ### Added
+
+- WebAssembly / WebUSB support via upstream nusb's WebUSB backend (`wasm`
+  feature, builds for `wasm32-unknown-unknown` with
+  `RUSTFLAGS='--cfg=web_sys_unstable_apis'`)
 - `embedded-hal` 1.0 trait implementations behind the `embedded-hal` feature flag:
   - `embedded_hal::spi::SpiDevice` via `FtdiSpiDevice` wrapper
   - `embedded_hal::i2c::I2c` via `FtdiI2c` wrapper
@@ -28,13 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `i2c_sensor` — TMP102 temperature sensor reading
   - `jtag_idcode` — JTAG chain scanning and IDCODE reading
 - Property-based tests for EEPROM build/decode round-trips using `proptest`
-- GitHub Actions CI workflow (build, test, clippy, feature combinations)
+- GitHub Actions CI workflow (build, test, clippy, feature combinations, wasm32 target)
 - LICENSE-MIT and LICENSE-APACHE files
 - CHANGELOG.md
 
-## [0.1.0] - 2025-02-09
+### Changed
+
+- Migrated to Rust edition 2024
+
+## [0.1.0] - 2026-03-20
 
 ### Added
+
 - Initial release with complete libftdi 1.5 API coverage
 - Core device I/O: open, configure, read/write, baud rate, serial properties
 - All FTDI chip types: AM, BM, FT2232C, FT232R, FT2232H, FT4232H, FT232H, FT230X

@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --example find_all
 
-use ftdi_nusb::constants::{pid, FTDI_VID};
+use ftdi_nusb::constants::{FTDI_VID, pid};
 
 fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();

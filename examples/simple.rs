@@ -8,7 +8,7 @@
 use std::io::Read;
 use std::time::Duration;
 
-use ftdi_nusb::constants::{pid, FTDI_VID};
+use ftdi_nusb::constants::{FTDI_VID, pid};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();

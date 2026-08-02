@@ -17,9 +17,9 @@
 //! cargo run --example i2c_sensor
 //! ```
 
-use ftdi_nusb::mpsse::i2c::I2cBus;
-use ftdi_nusb::mpsse::MpsseContext;
 use ftdi_nusb::FtdiDevice;
+use ftdi_nusb::mpsse::MpsseContext;
+use ftdi_nusb::mpsse::i2c::I2cBus;
 
 /// Default TMP102 I2C address (ADD0 = GND).
 const TMP102_ADDR: u8 = 0x48;

@@ -465,8 +465,8 @@ pub(crate) fn type2bit(channel_type: u8, chip: ChipType) -> u8 {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::eeprom::decode;
     use crate::eeprom::FtdiEeprom;
+    use crate::eeprom::decode;
     use crate::types::ChipType;
 
     // ---- type2bit tests ----
