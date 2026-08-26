@@ -33,20 +33,22 @@
 //! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
-use maybe_async::maybe_async;
-
 use crate::constants::mpsse;
-use crate::context::FtdiDevice;
+use crate::context::AsyncFtdiDevice;
 use crate::error::{Error, Result};
 
-use super::MpsseContext;
+use super::AsyncMpsseContext;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use super::blocking::SpiDevice;
+#[cfg(target_arch = "wasm32")]
+pub type SpiDevice = AsyncSpiDevice;
 
 /// Maximum bytes per single MPSSE transfer command (2-byte length field, encoding len-1).
 const MAX_MPSSE_TRANSFER: usize = 65536;
 
 /// Read exactly `len` bytes from the MPSSE, returning an error on short reads.
-#[maybe_async]
-async fn read_exact(dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
+async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     let mut offset = 0;
     while offset < len {
@@ -104,7 +106,7 @@ impl SpiMode {
 
 /// Configuration for an SPI device connected to the MPSSE.
 #[derive(Debug, Clone)]
-pub struct SpiDevice {
+pub struct AsyncSpiDevice {
     /// The SPI mode (clock polarity and phase).
     mode: SpiMode,
     /// Whether to use LSB-first bit order (default: MSB first).
@@ -125,7 +127,7 @@ pub struct SpiDevice {
     idle_value: u8,
 }
 
-impl SpiDevice {
+impl AsyncSpiDevice {
     /// Create a new SPI device configuration with default CS on ADBUS3.
     ///
     /// Initializes the MPSSE pins for SPI:
@@ -133,8 +135,11 @@ impl SpiDevice {
     /// - ADBUS1 (DO) = MOSI output
     /// - ADBUS2 (DI) = MISO input
     /// - ADBUS3 = CS# output (active low, deasserted on init)
-    #[maybe_async]
-    pub async fn new(ctx: &mut MpsseContext, dev: &mut FtdiDevice, mode: SpiMode) -> Result<Self> {
+    pub async fn new(
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
+        mode: SpiMode,
+    ) -> Result<Self> {
         Self::with_cs_pin(ctx, dev, mode, 0x08, true, false).await
     }
 
@@ -146,10 +151,9 @@ impl SpiDevice {
     /// `cs_active_low` controls the CS polarity (true = CS is active when low).
     ///
     /// `lsb_first` controls the bit order (true = LSB first, false = MSB first).
-    #[maybe_async]
     pub async fn with_cs_pin(
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         mode: SpiMode,
         cs_pin: u8,
         cs_active_low: bool,
@@ -212,8 +216,11 @@ impl SpiDevice {
     }
 
     /// Assert the chip-select line (make it active).
-    #[maybe_async]
-    pub async fn cs_assert(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn cs_assert(
+        &self,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
+    ) -> Result<()> {
         if self.cs_pin == 0 {
             return Ok(());
         }
@@ -226,8 +233,11 @@ impl SpiDevice {
     }
 
     /// Deassert the chip-select line (make it inactive).
-    #[maybe_async]
-    pub async fn cs_deassert(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn cs_deassert(
+        &self,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
+    ) -> Result<()> {
         if self.cs_pin == 0 {
             return Ok(());
         }
@@ -241,11 +251,10 @@ impl SpiDevice {
     /// Large transfers (>65536 bytes) are automatically split into multiple
     /// MPSSE commands within the same CS assertion.
     /// Returns the received bytes.
-    #[maybe_async]
     pub async fn transfer(
         &self,
-        _ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        _ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         tx: &[u8],
     ) -> Result<Vec<u8>> {
         if tx.is_empty() {
@@ -283,11 +292,10 @@ impl SpiDevice {
     ///
     /// CS is automatically asserted before and deasserted after the transfer.
     /// Large transfers (>65536 bytes) are automatically chunked.
-    #[maybe_async]
     pub async fn write(
         &self,
-        _ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        _ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         tx: &[u8],
     ) -> Result<()> {
         if tx.is_empty() {
@@ -320,11 +328,10 @@ impl SpiDevice {
     /// CS is automatically asserted before and deasserted after the transfer.
     /// Large reads (>65536 bytes) are automatically chunked.
     /// Returns the received bytes.
-    #[maybe_async]
     pub async fn read(
         &self,
-        _ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        _ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         len: usize,
     ) -> Result<Vec<u8>> {
         if len == 0 {
@@ -358,11 +365,10 @@ impl SpiDevice {
     /// This is common for SPI devices where you send a command and then
     /// read the response (e.g., reading a register).
     /// Large transfers (>65536 bytes in either direction) are automatically chunked.
-    #[maybe_async]
     pub async fn write_read(
         &self,
-        _ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        _ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         tx: &[u8],
         read_len: usize,
     ) -> Result<Vec<u8>> {
@@ -597,7 +603,7 @@ mod tests {
     #[test]
     fn cs_assert_active_low() {
         // Active low CS on ADBUS3 (0x08): idle has CS=high, asserted = CS low
-        let spi = SpiDevice {
+        let spi = AsyncSpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x08,
@@ -621,7 +627,7 @@ mod tests {
 
     #[test]
     fn cs_assert_active_high() {
-        let spi = SpiDevice {
+        let spi = AsyncSpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x08,
@@ -640,7 +646,7 @@ mod tests {
 
     #[test]
     fn cs_deassert_returns_to_idle() {
-        let spi = SpiDevice {
+        let spi = AsyncSpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x08,
@@ -659,7 +665,7 @@ mod tests {
 
     #[test]
     fn cs_pin_zero_is_noop() {
-        let spi = SpiDevice {
+        let spi = AsyncSpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x00, // Manual CS

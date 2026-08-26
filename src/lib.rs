@@ -38,25 +38,19 @@
 mod baudrate;
 pub mod constants;
 
-/// Internal platform-aware sleep helper.
+/// Internal asynchronous platform-aware sleep helper.
 ///
-/// In sync mode, uses `std::thread::sleep`. In WASM async mode, uses
-/// `setTimeout` via a JS Promise. Works in both Window and Worker contexts.
+/// Uses a native timer future or `setTimeout` via a JS Promise on WASM.
 pub(crate) mod sleep_util {
     use core::time::Duration;
 
     /// Sleep for the given duration.
     ///
-    /// - Native targets block the thread with `std::thread::sleep`.
+    /// - Native targets yield via a timer future.
     /// - WASM targets yield via a `setTimeout` Promise.
-    #[maybe_async::maybe_async]
     pub(crate) async fn sleep(duration: Duration) {
-        let _ = duration;
-
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::sleep(duration);
-        }
+        futures_timer::Delay::new(duration).await;
 
         #[cfg(target_arch = "wasm32")]
         {

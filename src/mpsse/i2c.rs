@@ -32,20 +32,23 @@
 //! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
-use maybe_async::maybe_async;
-
 use crate::constants::mpsse;
-use crate::context::FtdiDevice;
+use crate::context::AsyncFtdiDevice;
 use crate::error::{Error, Result};
 
-use super::MpsseContext;
+use super::AsyncMpsseContext;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use super::blocking::I2cBus;
+#[cfg(target_arch = "wasm32")]
+pub type I2cBus = AsyncI2cBus;
 
 /// I2C bus instance using MPSSE.
 ///
 /// Manages the I2C bus state including the pin directions needed for
 /// open-drain SDA signaling.
 #[derive(Debug, Clone)]
-pub struct I2cBus {
+pub struct AsyncI2cBus {
     /// Direction mask when driving SDA (DO=output for low, DI=input).
     /// SCL is always output via SK (bit 0).
     /// SDA driven: DO (bit 1) = output, DI (bit 2) = input.
@@ -78,7 +81,7 @@ impl core::fmt::Display for I2cError {
     }
 }
 
-impl I2cBus {
+impl AsyncI2cBus {
     /// Initialize I2C mode on the MPSSE.
     ///
     /// Enables 3-phase data clocking and configures pins for I2C operation.
@@ -86,8 +89,7 @@ impl I2cBus {
     ///
     /// The MPSSE clock should already be set to the desired I2C bus speed
     /// (typically 100 kHz or 400 kHz).
-    #[maybe_async]
-    pub async fn new(ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<Self> {
+    pub async fn new(ctx: &mut AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<Self> {
         if !ctx.is_h_type() {
             return Err(Error::InvalidArgument(
                 "I2C requires an H-type chip (FT2232H/FT4232H/FT232H)",
@@ -121,8 +123,11 @@ impl I2cBus {
     /// Generate an I2C START condition.
     ///
     /// SDA goes low while SCL is high.
-    #[maybe_async]
-    pub async fn start(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn start(
+        &self,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
+    ) -> Result<()> {
         let high = 0x03 | self.extra_val; // SCL=1, SDA=1
         let sda_low = 0x01 | self.extra_val; // SCL=1, SDA=0
         let both_low = self.extra_val; // SCL=0, SDA=0
@@ -153,8 +158,7 @@ impl I2cBus {
     /// Generate an I2C STOP condition.
     ///
     /// SDA goes high while SCL is high.
-    #[maybe_async]
-    pub async fn stop(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn stop(&self, ctx: &mut AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<()> {
         let both_low = self.extra_val; // SCL=0, SDA=0
         let scl_high = 0x01 | self.extra_val; // SCL=1, SDA=0
         let both_high = 0x03 | self.extra_val; // SCL=1, SDA=1
@@ -186,8 +190,7 @@ impl I2cBus {
     /// Write a single byte and return whether ACK was received.
     ///
     /// Returns `true` if ACK (SDA=0) was received, `false` for NACK.
-    #[maybe_async]
-    pub async fn write_byte(&self, dev: &mut FtdiDevice, byte: u8) -> Result<bool> {
+    pub async fn write_byte(&self, dev: &mut AsyncFtdiDevice, byte: u8) -> Result<bool> {
         let mut cmd = Vec::with_capacity(20);
 
         // Set SDA as output for writing
@@ -240,8 +243,7 @@ impl I2cBus {
     ///
     /// Set `ack` to `true` to acknowledge (continue reading) or `false`
     /// to NACK (signal end of read).
-    #[maybe_async]
-    pub async fn read_byte(&self, dev: &mut FtdiDevice, ack: bool) -> Result<u8> {
+    pub async fn read_byte(&self, dev: &mut AsyncFtdiDevice, ack: bool) -> Result<u8> {
         let mut cmd = Vec::with_capacity(20);
 
         // Release SDA for reading
@@ -287,11 +289,10 @@ impl I2cBus {
     ///
     /// Sends START, address+W, data bytes, STOP. Returns an error if any
     /// byte is NACKed.
-    #[maybe_async]
     pub async fn write(
         &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         address: u8,
         data: &[u8],
     ) -> Result<()> {
@@ -322,11 +323,10 @@ impl I2cBus {
     /// Read data from an I2C slave device.
     ///
     /// Sends START, address+R, reads `len` bytes (ACK all except last), STOP.
-    #[maybe_async]
     pub async fn read(
         &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         address: u8,
         len: usize,
     ) -> Result<Vec<u8>> {
@@ -363,11 +363,10 @@ impl I2cBus {
     ///
     /// Common pattern: write a register address, then read data from it.
     /// Uses a repeated START between write and read phases.
-    #[maybe_async]
     pub async fn write_read(
         &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         address: u8,
         write_data: &[u8],
         read_len: usize,

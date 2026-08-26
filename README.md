@@ -166,7 +166,9 @@ dev.write_all(b"Hello from async Rust!\r\n").await?;
 The features only select how nusb offloads blocking operating-system calls
 needed for discovery and opening. USB transfers themselves are
 runtime-independent. When both features are enabled, nusb uses its smol path.
-High-level native MPSSE and `embedded-hal` APIs currently remain blocking.
+MPSSE provides matching `Async*` types for async applications while preserving
+its established blocking type names. The synchronous `embedded-hal` adapters
+remain on those blocking wrappers.
 
 ## WASM / WebUSB Support
 

@@ -31,12 +31,17 @@
 //! # Ok::<(), ftdi_nusb::Error>(())
 //! ```
 
-use maybe_async::maybe_async;
-
-use crate::context::FtdiDevice;
+use crate::context::AsyncFtdiDevice;
 use crate::error::{Error, Result};
 
-use super::MpsseContext;
+use super::AsyncMpsseContext;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use super::blocking::{GpioGroup, GpioPin};
+#[cfg(target_arch = "wasm32")]
+pub type GpioPin = AsyncGpioPin;
+#[cfg(target_arch = "wasm32")]
+pub type GpioGroup = AsyncGpioGroup;
 
 /// GPIO bank selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,13 +66,13 @@ pub enum Direction {
 /// Tracks the bank and bit position. Operations apply through the
 /// `MpsseContext` so that other pins are not disturbed.
 #[derive(Debug, Clone)]
-pub struct GpioPin {
+pub struct AsyncGpioPin {
     bank: GpioBank,
     bit: u8,
     mask: u8,
 }
 
-impl GpioPin {
+impl AsyncGpioPin {
     /// Create a new GPIO pin reference.
     ///
     /// `bank` selects low (ADBUS) or high (ACBUS) byte.
@@ -114,11 +119,10 @@ impl GpioPin {
     /// Configure this pin as an output and set its initial value.
     ///
     /// `high` sets the pin high (true) or low (false).
-    #[maybe_async]
     pub async fn set_output(
         &mut self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         high: bool,
     ) -> Result<()> {
         match self.bank {
@@ -146,8 +150,11 @@ impl GpioPin {
     }
 
     /// Configure this pin as an input (high-impedance).
-    #[maybe_async]
-    pub async fn set_input(&mut self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn set_input(
+        &mut self,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
+    ) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
                 let dir = ctx.gpio_low_dir() & !self.mask;
@@ -163,11 +170,10 @@ impl GpioPin {
     }
 
     /// Write a value to this pin (must already be configured as output).
-    #[maybe_async]
     pub async fn write(
         &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         high: bool,
     ) -> Result<()> {
         match self.bank {
@@ -201,8 +207,7 @@ impl GpioPin {
     }
 
     /// Read the current state of this pin.
-    #[maybe_async]
-    pub async fn read(&self, ctx: &MpsseContext, dev: &mut FtdiDevice) -> Result<bool> {
+    pub async fn read(&self, ctx: &AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<bool> {
         let byte = match self.bank {
             GpioBank::Low => ctx.get_gpio_low(dev).await?,
             GpioBank::High => ctx.get_gpio_high(dev).await?,
@@ -211,7 +216,7 @@ impl GpioPin {
     }
 
     /// Check whether this pin is currently configured as an output.
-    pub fn is_output(&self, ctx: &MpsseContext) -> bool {
+    pub fn is_output(&self, ctx: &AsyncMpsseContext) -> bool {
         let dir = match self.bank {
             GpioBank::Low => ctx.gpio_low_dir(),
             GpioBank::High => ctx.gpio_high_dir(),
@@ -224,12 +229,12 @@ impl GpioPin {
 ///
 /// Useful for setting multiple pins at once in a single USB transfer.
 #[derive(Debug, Clone)]
-pub struct GpioGroup {
+pub struct AsyncGpioGroup {
     bank: GpioBank,
     mask: u8,
 }
 
-impl GpioGroup {
+impl AsyncGpioGroup {
     /// Create a new GPIO group for the given bank with the given pin mask.
     ///
     /// Each set bit in `mask` represents a pin in the group.
@@ -250,11 +255,10 @@ impl GpioGroup {
     /// Configure all pins in this group as outputs with the given values.
     ///
     /// Only the bits corresponding to `self.mask` in `values` are used.
-    #[maybe_async]
     pub async fn set_all_output(
         &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
         values: u8,
     ) -> Result<()> {
         match self.bank {
@@ -274,8 +278,11 @@ impl GpioGroup {
     }
 
     /// Configure all pins in this group as inputs.
-    #[maybe_async]
-    pub async fn set_all_input(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn set_all_input(
+        &self,
+        ctx: &mut AsyncMpsseContext,
+        dev: &mut AsyncFtdiDevice,
+    ) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
                 let dir = ctx.gpio_low_dir() & !self.mask;
@@ -293,8 +300,7 @@ impl GpioGroup {
     /// Read the current state of all pins in this group.
     ///
     /// Returns the raw byte with only the group's bits relevant.
-    #[maybe_async]
-    pub async fn read(&self, ctx: &MpsseContext, dev: &mut FtdiDevice) -> Result<u8> {
+    pub async fn read(&self, ctx: &AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<u8> {
         let byte = match self.bank {
             GpioBank::Low => ctx.get_gpio_low(dev).await?,
             GpioBank::High => ctx.get_gpio_high(dev).await?,
@@ -309,7 +315,7 @@ mod tests {
 
     #[test]
     fn gpio_pin_new() {
-        let pin = GpioPin::new(GpioBank::Low, 4);
+        let pin = AsyncGpioPin::new(GpioBank::Low, 4);
         assert_eq!(pin.bank(), GpioBank::Low);
         assert_eq!(pin.bit(), 4);
         assert_eq!(pin.mask(), 0x10);
@@ -317,41 +323,41 @@ mod tests {
 
     #[test]
     fn gpio_pin_bit_0() {
-        let pin = GpioPin::new(GpioBank::High, 0);
+        let pin = AsyncGpioPin::new(GpioBank::High, 0);
         assert_eq!(pin.mask(), 0x01);
     }
 
     #[test]
     fn gpio_pin_bit_7() {
-        let pin = GpioPin::new(GpioBank::Low, 7);
+        let pin = AsyncGpioPin::new(GpioBank::Low, 7);
         assert_eq!(pin.mask(), 0x80);
     }
 
     #[test]
     #[should_panic(expected = "GPIO bit must be 0-7")]
     fn gpio_pin_bit_too_high() {
-        GpioPin::new(GpioBank::Low, 8);
+        AsyncGpioPin::new(GpioBank::Low, 8);
     }
 
     #[test]
     fn gpio_group_mask() {
-        let group = GpioGroup::new(GpioBank::Low, 0xF0);
+        let group = AsyncGpioGroup::new(GpioBank::Low, 0xF0);
         assert_eq!(group.bank(), GpioBank::Low);
         assert_eq!(group.mask(), 0xF0);
     }
 
     #[test]
     fn is_output_when_not_initialized() {
-        let pin = GpioPin::new(GpioBank::Low, 4);
+        let pin = AsyncGpioPin::new(GpioBank::Low, 4);
         // MpsseContext with all zeros — pin should not be output
-        let ctx = MpsseContext::test_new(false);
+        let ctx = AsyncMpsseContext::test_new(false);
         assert!(!pin.is_output(&ctx));
     }
 
     #[test]
     fn is_output_when_dir_set() {
-        let pin = GpioPin::new(GpioBank::Low, 4);
-        let mut ctx = MpsseContext::test_new(false);
+        let pin = AsyncGpioPin::new(GpioBank::Low, 4);
+        let mut ctx = AsyncMpsseContext::test_new(false);
         ctx.update_gpio_low_state(0x10, 0x10); // pin 4 = output
         assert!(pin.is_output(&ctx));
     }

@@ -59,6 +59,10 @@ impl FtdiDevice {
         self.0
     }
 
+    pub(crate) fn as_async_mut(&mut self) -> &mut AsyncFtdiDevice {
+        &mut self.0
+    }
+
     pub(crate) fn bulk_in_endpoint(
         &self,
     ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>> {
