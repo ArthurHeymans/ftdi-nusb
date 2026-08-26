@@ -46,18 +46,25 @@ pub type SpiDevice = AsyncSpiDevice;
 
 /// Maximum bytes per single MPSSE transfer command (2-byte length field, encoding len-1).
 const MAX_MPSSE_TRANSFER: usize = 65536;
+/// Bound read-producing commands so the FTDI MPSSE output FIFO cannot fill
+/// before the host queues the corresponding USB read.
+const MAX_MPSSE_IO_CHUNK: usize = 1024;
 
 /// Read exactly `len` bytes from the MPSSE, returning an error on short reads.
 async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     let mut offset = 0;
+    let mut empty_reads = 0;
     while offset < len {
         let n = dev.read_data(&mut buf[offset..]).await?;
         if n == 0 {
-            return Err(Error::InvalidArgument(
-                "SPI read returned fewer bytes than expected",
-            ));
+            empty_reads += 1;
+            if empty_reads >= 10 {
+                return Err(Error::Timeout(dev.read_timeout()));
+            }
+            continue;
         }
+        empty_reads = 0;
         offset += n;
     }
     Ok(buf)
@@ -247,13 +254,12 @@ impl AsyncSpiDevice {
     /// Full-duplex SPI transfer: simultaneously write `tx` and read the same
     /// number of bytes.
     ///
-    /// CS is automatically asserted before and deasserted after the transfer.
-    /// Large transfers (>65536 bytes) are automatically split into multiple
-    /// MPSSE commands within the same CS assertion.
-    /// Returns the received bytes.
+    /// Read-producing commands are bounded and drained incrementally while CS
+    /// remains asserted, preventing the FTDI MPSSE output FIFO from deadlocking
+    /// large transfers.
     pub async fn transfer(
         &self,
-        _ctx: &mut AsyncMpsseContext,
+        ctx: &mut AsyncMpsseContext,
         dev: &mut AsyncFtdiDevice,
         tx: &[u8],
     ) -> Result<Vec<u8>> {
@@ -261,40 +267,34 @@ impl AsyncSpiDevice {
             return Ok(Vec::new());
         }
 
-        let total = tx.len();
-        let mut cmd = Vec::with_capacity(10 + total);
-
-        // Assert CS
-        self.append_cs_assert(&mut cmd);
-
-        // Emit one or more R/W commands for chunks up to MAX_MPSSE_TRANSFER
-        let mut offset = 0;
-        while offset < total {
-            let chunk_len = (total - offset).min(MAX_MPSSE_TRANSFER);
-            let (lo, hi) = encode_len(chunk_len);
-            cmd.push(self.rw_cmd);
-            cmd.push(lo);
-            cmd.push(hi);
-            cmd.extend_from_slice(&tx[offset..offset + chunk_len]);
-            offset += chunk_len;
+        self.cs_assert(ctx, dev).await?;
+        let mut received = Vec::with_capacity(tx.len());
+        let operation = async {
+            for chunk in tx.chunks(MAX_MPSSE_IO_CHUNK) {
+                let (lo, hi) = encode_len(chunk.len());
+                let mut cmd = Vec::with_capacity(chunk.len() + 4);
+                cmd.extend_from_slice(&[self.rw_cmd, lo, hi]);
+                cmd.extend_from_slice(chunk);
+                cmd.push(mpsse::SEND_IMMEDIATE);
+                dev.write_all(&cmd).await?;
+                received.extend(read_exact(dev, chunk.len()).await?);
+            }
+            Ok::<(), Error>(())
         }
-
-        // Deassert CS + flush
-        self.append_cs_deassert(&mut cmd);
-        cmd.push(mpsse::SEND_IMMEDIATE);
-
-        dev.write_all(&cmd).await?;
-
-        read_exact(dev, total).await
+        .await;
+        let cleanup = self.cs_deassert(ctx, dev).await;
+        operation?;
+        cleanup?;
+        Ok(received)
     }
 
     /// Write-only SPI transfer.
     ///
     /// CS is automatically asserted before and deasserted after the transfer.
-    /// Large transfers (>65536 bytes) are automatically chunked.
+    /// Large transfers are split into MPSSE commands within one CS assertion.
     pub async fn write(
         &self,
-        _ctx: &mut AsyncMpsseContext,
+        ctx: &mut AsyncMpsseContext,
         dev: &mut AsyncFtdiDevice,
         tx: &[u8],
     ) -> Result<()> {
@@ -302,35 +302,30 @@ impl AsyncSpiDevice {
             return Ok(());
         }
 
-        let total = tx.len();
-        let mut cmd = Vec::with_capacity(10 + total);
-
-        self.append_cs_assert(&mut cmd);
-
-        let mut offset = 0;
-        while offset < total {
-            let chunk_len = (total - offset).min(MAX_MPSSE_TRANSFER);
-            let (lo, hi) = encode_len(chunk_len);
-            cmd.push(self.write_cmd);
-            cmd.push(lo);
-            cmd.push(hi);
-            cmd.extend_from_slice(&tx[offset..offset + chunk_len]);
-            offset += chunk_len;
+        self.cs_assert(ctx, dev).await?;
+        let operation = async {
+            for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
+                let (lo, hi) = encode_len(chunk.len());
+                let mut cmd = Vec::with_capacity(chunk.len() + 3);
+                cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
+                cmd.extend_from_slice(chunk);
+                dev.write_all(&cmd).await?;
+            }
+            Ok::<(), Error>(())
         }
-
-        self.append_cs_deassert(&mut cmd);
-
-        dev.write_all(&cmd).await
+        .await;
+        let cleanup = self.cs_deassert(ctx, dev).await;
+        operation?;
+        cleanup
     }
 
-    /// Read-only SPI transfer (writes zeros while reading).
+    /// Read-only SPI transfer.
     ///
     /// CS is automatically asserted before and deasserted after the transfer.
-    /// Large reads (>65536 bytes) are automatically chunked.
-    /// Returns the received bytes.
+    /// Read-producing commands are drained incrementally.
     pub async fn read(
         &self,
-        _ctx: &mut AsyncMpsseContext,
+        ctx: &mut AsyncMpsseContext,
         dev: &mut AsyncFtdiDevice,
         len: usize,
     ) -> Result<Vec<u8>> {
@@ -338,36 +333,31 @@ impl AsyncSpiDevice {
             return Ok(Vec::new());
         }
 
-        let mut cmd = Vec::with_capacity(16);
-
-        self.append_cs_assert(&mut cmd);
-
-        let mut remaining = len;
-        while remaining > 0 {
-            let chunk_len = remaining.min(MAX_MPSSE_TRANSFER);
-            let (lo, hi) = encode_len(chunk_len);
-            cmd.push(self.read_cmd);
-            cmd.push(lo);
-            cmd.push(hi);
-            remaining -= chunk_len;
+        self.cs_assert(ctx, dev).await?;
+        let mut received = Vec::with_capacity(len);
+        let operation = async {
+            let mut remaining = len;
+            while remaining > 0 {
+                let chunk_len = remaining.min(MAX_MPSSE_IO_CHUNK);
+                let (lo, hi) = encode_len(chunk_len);
+                dev.write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
+                    .await?;
+                received.extend(read_exact(dev, chunk_len).await?);
+                remaining -= chunk_len;
+            }
+            Ok::<(), Error>(())
         }
-
-        self.append_cs_deassert(&mut cmd);
-        cmd.push(mpsse::SEND_IMMEDIATE);
-
-        dev.write_all(&cmd).await?;
-
-        read_exact(dev, len).await
+        .await;
+        let cleanup = self.cs_deassert(ctx, dev).await;
+        operation?;
+        cleanup?;
+        Ok(received)
     }
 
     /// Perform a write-then-read SPI transaction with a single CS assertion.
-    ///
-    /// This is common for SPI devices where you send a command and then
-    /// read the response (e.g., reading a register).
-    /// Large transfers (>65536 bytes in either direction) are automatically chunked.
     pub async fn write_read(
         &self,
-        _ctx: &mut AsyncMpsseContext,
+        ctx: &mut AsyncMpsseContext,
         dev: &mut AsyncFtdiDevice,
         tx: &[u8],
         read_len: usize,
@@ -376,50 +366,33 @@ impl AsyncSpiDevice {
             return Ok(Vec::new());
         }
 
-        let mut cmd = Vec::with_capacity(16 + tx.len());
-
-        self.append_cs_assert(&mut cmd);
-
-        // Write phase (chunked)
-        if !tx.is_empty() {
-            let mut offset = 0;
-            while offset < tx.len() {
-                let chunk_len = (tx.len() - offset).min(MAX_MPSSE_TRANSFER);
-                let (lo, hi) = encode_len(chunk_len);
-                cmd.push(self.write_cmd);
-                cmd.push(lo);
-                cmd.push(hi);
-                cmd.extend_from_slice(&tx[offset..offset + chunk_len]);
-                offset += chunk_len;
+        self.cs_assert(ctx, dev).await?;
+        let mut received = Vec::with_capacity(read_len);
+        let operation = async {
+            for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
+                let (lo, hi) = encode_len(chunk.len());
+                let mut cmd = Vec::with_capacity(chunk.len() + 3);
+                cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
+                cmd.extend_from_slice(chunk);
+                dev.write_all(&cmd).await?;
             }
-        }
 
-        // Read phase (chunked)
-        if read_len > 0 {
             let mut remaining = read_len;
             while remaining > 0 {
-                let chunk_len = remaining.min(MAX_MPSSE_TRANSFER);
+                let chunk_len = remaining.min(MAX_MPSSE_IO_CHUNK);
                 let (lo, hi) = encode_len(chunk_len);
-                cmd.push(self.read_cmd);
-                cmd.push(lo);
-                cmd.push(hi);
+                dev.write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
+                    .await?;
+                received.extend(read_exact(dev, chunk_len).await?);
                 remaining -= chunk_len;
             }
+            Ok::<(), Error>(())
         }
-
-        self.append_cs_deassert(&mut cmd);
-
-        if read_len > 0 {
-            cmd.push(mpsse::SEND_IMMEDIATE);
-        }
-
-        dev.write_all(&cmd).await?;
-
-        if read_len == 0 {
-            return Ok(Vec::new());
-        }
-
-        read_exact(dev, read_len).await
+        .await;
+        let cleanup = self.cs_deassert(ctx, dev).await;
+        operation?;
+        cleanup?;
+        Ok(received)
     }
 
     /// Get the current SPI mode.
@@ -442,6 +415,7 @@ impl AsyncSpiDevice {
     /// This is a zero-cost helper for building MPSSE command buffers without
     /// needing a mutable reference to `MpsseContext` or `FtdiDevice`.
     /// If `cs_pin` is 0 (manual CS), this is a no-op.
+    #[cfg(test)]
     fn append_cs_assert(&self, cmd: &mut Vec<u8>) {
         if self.cs_pin == 0 {
             return;
@@ -457,6 +431,7 @@ impl AsyncSpiDevice {
     /// Append a SET_BITS_LOW command to `cmd` that deasserts CS (returns to idle).
     ///
     /// If `cs_pin` is 0 (manual CS), this is a no-op.
+    #[cfg(test)]
     fn append_cs_deassert(&self, cmd: &mut Vec<u8>) {
         if self.cs_pin == 0 {
             return;

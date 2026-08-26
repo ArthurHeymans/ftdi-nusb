@@ -48,29 +48,6 @@ impl TransferDeadline {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct CancelOnDrop<'a, EpType, Dir>
-where
-    EpType: nusb::transfer::BulkOrInterrupt,
-    Dir: nusb::transfer::EndpointDirection,
-{
-    endpoint: &'a mut nusb::Endpoint<EpType, Dir>,
-    armed: bool,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl<EpType, Dir> Drop for CancelOnDrop<'_, EpType, Dir>
-where
-    EpType: nusb::transfer::BulkOrInterrupt,
-    Dir: nusb::transfer::EndpointDirection,
-{
-    fn drop(&mut self) {
-        if self.armed {
-            self.endpoint.cancel_all();
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 async fn next_before_deadline<EpType, Dir>(
     endpoint: &mut nusb::Endpoint<EpType, Dir>,
     deadline: TransferDeadline,
@@ -132,13 +109,10 @@ where
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut guard = CancelOnDrop {
-            endpoint,
-            armed: true,
-        };
-        let completion = next_before_deadline(guard.endpoint, deadline).await;
-        guard.armed = completion.is_none();
-        completion
+        // `Endpoint::next_complete` is cancellation-safe. Leaving a timed-out or
+        // externally-cancelled transfer queued lets the next operation resume it
+        // instead of discarding serial input that arrived at the timeout boundary.
+        next_before_deadline(endpoint, deadline).await
     }
 }
 
@@ -592,6 +566,21 @@ impl AsyncFtdiDevice {
 // ---- Internal USB helpers ----
 
 impl AsyncFtdiDevice {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_endpoint_mut(
+        &mut self,
+    ) -> &mut nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In> {
+        &mut self.read_endpoint
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn mark_stream_abandoned(&mut self) {
+        // `recover` must return an abandoned stream to UART/reset mode rather
+        // than restoring the synchronous-FIFO mode that was interrupted.
+        self.bitbang_enabled = false;
+        self.bitbang_mode = BitMode::Reset;
+    }
+
     /// Open the bulk IN endpoint (device -> host) for reading.
     ///
     /// This is used by the streaming and async modules and should not be called directly.
@@ -1060,6 +1049,10 @@ impl AsyncFtdiDevice {
     ///
     /// Data is sent in chunks of [`write_chunksize`](Self::write_chunksize).
     /// Returns the number of bytes written.
+    ///
+    /// If this future is cancelled, an already-submitted chunk remains queued.
+    /// The next write waits for that chunk before submitting new data, so callers
+    /// must treat cancellation as a possibly-partial write.
     pub async fn write_data(&mut self, buf: &[u8]) -> Result<usize> {
         let mut offset = 0;
 
@@ -1072,13 +1065,13 @@ impl AsyncFtdiDevice {
 
             let deadline = TransferDeadline::new(self.write_timeout);
             if !clear_pending_transfers(&mut self.write_endpoint, deadline).await {
-                return Err(Error::Transfer(nusb::transfer::TransferError::Cancelled));
+                return Err(Error::Timeout(self.write_timeout));
             }
             self.write_endpoint.submit(transfer_buf);
 
             let completion = wait_for_completion(&mut self.write_endpoint, deadline)
                 .await
-                .ok_or(Error::Transfer(nusb::transfer::TransferError::Cancelled))?;
+                .ok_or(Error::Timeout(self.write_timeout))?;
             completion.status.map_err(Error::Transfer)?;
             offset += completion.actual_len;
         }
@@ -1093,14 +1086,17 @@ impl AsyncFtdiDevice {
     /// read into `buf`.
     ///
     /// Returns 0 if no data is available (the chip only sent status bytes).
+    ///
+    /// This operation is cancellation-safe with respect to input consumption:
+    /// an in-flight USB read remains queued and the next call resumes it.
     pub async fn read_data(&mut self, buf: &mut [u8]) -> Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
 
-        let packet_size = self.max_packet_size;
-        if packet_size == 0 {
-            return Err(Error::InvalidArgument("max_packet_size is zero"));
+        let packet_size = self.read_endpoint.max_packet_size();
+        if packet_size <= 2 {
+            return Err(Error::InvalidArgument("invalid read endpoint packet size"));
         }
 
         // Serve from internal buffer first
@@ -1114,20 +1110,29 @@ impl AsyncFtdiDevice {
             return Ok(n);
         }
 
-        // Issue a USB bulk read.
-        let transfer_buf = nusb::transfer::Buffer::new(self.readbuffer_chunksize);
+        // Resume an in-flight read left by a timed-out or cancelled future.
+        // `next_complete` is cancellation-safe, so this preserves serial input
+        // instead of draining and discarding it on the next call.
         let deadline = TransferDeadline::new(self.read_timeout);
-        if !clear_pending_transfers(&mut self.read_endpoint, deadline).await {
-            return Err(Error::Transfer(nusb::transfer::TransferError::Cancelled));
+        if self.read_endpoint.pending() == 0 {
+            let transfer_size =
+                read_transfer_size(buf.len(), self.readbuffer_chunksize, packet_size)
+                    .ok_or(Error::InvalidArgument("read transfer size overflow"))?;
+            self.readbuffer.resize(transfer_size, 0);
+            self.read_endpoint
+                .submit(nusb::transfer::Buffer::new(transfer_size));
         }
-        self.read_endpoint.submit(transfer_buf);
 
         let completion = wait_for_completion(&mut self.read_endpoint, deadline)
             .await
-            .ok_or(Error::Transfer(nusb::transfer::TransferError::Cancelled))?;
+            .ok_or(Error::Timeout(self.read_timeout))?;
         completion.status.map_err(Error::Transfer)?;
 
         let actual_length = completion.actual_len;
+        log::trace!(
+            "bulk IN completed: requested={} actual={actual_length}",
+            completion.buffer.requested_len()
+        );
 
         if actual_length <= 2 {
             // Only modem status bytes, no payload
@@ -1173,6 +1178,25 @@ impl AsyncFtdiDevice {
         }
         Ok(())
     }
+}
+
+/// Choose a raw USB transfer size large enough to hold `payload_len` bytes
+/// after accounting for the two FTDI status bytes in every packet.
+fn read_transfer_size(
+    payload_len: usize,
+    configured_size: usize,
+    packet_size: usize,
+) -> Option<usize> {
+    let payload_per_packet = packet_size.checked_sub(2)?;
+    let payload_packets = payload_len.div_ceil(payload_per_packet);
+    let payload_raw_size = payload_packets.checked_mul(packet_size)?;
+    let configured_packets = configured_size.div_ceil(packet_size).max(1);
+    let configured_raw_size = configured_packets.checked_mul(packet_size)?;
+    // Treat the configured chunk size as a cap. Requesting more than the
+    // caller needs can hang when an MPSSE response ends exactly on a full USB
+    // packet: the device has no short packet left to terminate a larger URB.
+    let transfer_size = payload_raw_size.min(configured_raw_size);
+    (transfer_size <= u32::MAX as usize).then_some(transfer_size)
 }
 
 /// Strip the 2-byte modem status header from each packet in a raw USB bulk
@@ -1302,16 +1326,40 @@ impl AsyncFtdiDevice {
             .is_ok()
     }
 
-    /// Attempt to recover from a USB error by resetting the device.
+    /// Attempt to recover from an interrupted or failed operation.
+    ///
+    /// On native targets this first cancels and drains queued endpoint transfers.
+    /// Call this after dropping a stateful operation such as a streaming session
+    /// before issuing unrelated protocol commands.
     pub async fn recover(&mut self) -> Result<()> {
-        self.usb_reset().await?;
-        if self.baudrate > 0 {
-            let baud = self.baudrate;
-            self.set_baudrate(baud).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let read_deadline = TransferDeadline::new(self.read_timeout);
+            self.read_endpoint.cancel_all();
+            if !clear_pending_transfers(&mut self.read_endpoint, read_deadline).await {
+                return Err(Error::Timeout(self.read_timeout));
+            }
+
+            let write_deadline = TransferDeadline::new(self.write_timeout);
+            self.write_endpoint.cancel_all();
+            if !clear_pending_transfers(&mut self.write_endpoint, write_deadline).await {
+                return Err(Error::Timeout(self.write_timeout));
+            }
         }
-        if self.bitbang_enabled {
-            let mode = self.bitbang_mode;
-            self.set_bitmode(0xFF, mode).await?;
+
+        let baudrate = self.baudrate;
+        let restore_bitbang = self.bitbang_enabled;
+        let bitbang_mode = self.bitbang_mode;
+
+        self.usb_reset().await?;
+        // The FTDI USB reset request does not reliably leave synchronous FIFO
+        // or bitbang mode, so explicitly return the pins to UART/reset mode.
+        self.set_bitmode(0xFF, BitMode::Reset).await?;
+        if baudrate > 0 {
+            self.set_baudrate(baudrate).await?;
+        }
+        if restore_bitbang {
+            self.set_bitmode(0xFF, bitbang_mode).await?;
         }
         Ok(())
     }
@@ -1320,6 +1368,19 @@ impl AsyncFtdiDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_transfer_size_accounts_for_status_bytes() {
+        assert_eq!(read_transfer_size(2040, 4096, 512), Some(2048));
+        assert_eq!(read_transfer_size(4080, 4096, 512), Some(4096));
+        assert_eq!(read_transfer_size(4081, 4096, 512), Some(4096));
+        assert_eq!(read_transfer_size(4096, 4096, 512), Some(4096));
+    }
+
+    #[test]
+    fn read_transfer_size_rounds_configured_size_to_packets() {
+        assert_eq!(read_transfer_size(1, 4097, 512), Some(512));
+    }
 
     #[test]
     fn strip_modem_status_single_packet() {

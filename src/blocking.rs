@@ -1,6 +1,5 @@
 //! Blocking wrapper around the asynchronous FTDI device implementation.
 
-use core::ops::{Deref, DerefMut};
 use core::time::Duration;
 
 use nusb::MaybeFuture;
@@ -95,20 +94,6 @@ impl AsyncFtdiDevice {
     }
 }
 
-impl Deref for FtdiDevice {
-    type Target = AsyncFtdiDevice;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for FtdiDevice {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 macro_rules! forward_ref {
     ($(fn $name:ident(&self $(, $arg:ident: $ty:ty)*) -> $ret:ty;)*) => {$(
         pub fn $name(&self, $($arg: $ty),*) -> $ret {
@@ -126,6 +111,74 @@ macro_rules! forward_mut {
 }
 
 impl FtdiDevice {
+    /// The detected FTDI chip type.
+    pub fn chip_type(&self) -> ChipType {
+        self.0.chip_type()
+    }
+
+    /// The currently configured baud rate.
+    pub fn baudrate(&self) -> u32 {
+        self.0.baudrate()
+    }
+
+    /// The USB maximum packet size for this device.
+    pub fn max_packet_size(&self) -> usize {
+        self.0.max_packet_size()
+    }
+
+    pub fn set_read_timeout(&mut self, timeout: Duration) {
+        self.0.set_read_timeout(timeout);
+    }
+
+    pub fn set_write_timeout(&mut self, timeout: Duration) {
+        self.0.set_write_timeout(timeout);
+    }
+
+    pub fn read_timeout(&self) -> Duration {
+        self.0.read_timeout()
+    }
+
+    pub fn write_timeout(&self) -> Duration {
+        self.0.write_timeout()
+    }
+
+    pub fn set_read_chunksize(&mut self, chunksize: usize) {
+        self.0.set_read_chunksize(chunksize);
+    }
+
+    pub fn read_chunksize(&self) -> usize {
+        self.0.read_chunksize()
+    }
+
+    pub fn set_write_chunksize(&mut self, chunksize: usize) {
+        self.0.set_write_chunksize(chunksize);
+    }
+
+    pub fn write_chunksize(&self) -> usize {
+        self.0.write_chunksize()
+    }
+
+    pub fn eeprom_decode(&mut self) -> Result<()> {
+        self.0.eeprom_decode()
+    }
+
+    pub fn eeprom_init_defaults(
+        &mut self,
+        manufacturer: Option<&str>,
+        product: Option<&str>,
+        serial: Option<&str>,
+    ) {
+        self.0.eeprom_init_defaults(manufacturer, product, serial);
+    }
+
+    pub fn eeprom(&self) -> &crate::FtdiEeprom {
+        self.0.eeprom()
+    }
+
+    pub fn eeprom_mut(&mut self) -> &mut crate::FtdiEeprom {
+        self.0.eeprom_mut()
+    }
+
     forward_mut! {
         fn usb_reset(&mut self) -> Result<()>;
         fn flush_rx(&mut self) -> Result<()>;

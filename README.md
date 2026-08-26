@@ -170,6 +170,35 @@ MPSSE provides matching `Async*` types for async applications while preserving
 its established blocking type names. The synchronous `embedded-hal` adapters
 remain on those blocking wrappers.
 
+Async reads preserve an in-flight USB read when their future is cancelled, so
+the next read resumes without silently discarding serial input. Writes may have
+partially completed when cancelled. Stateful protocol or streaming sessions
+should be finished explicitly; call `AsyncFtdiDevice::recover().await` after
+dropping an unfinished session.
+
+### Async streaming
+
+```rust,no_run
+use ftdi_nusb::{AsyncFtdiDevice, StreamEvent};
+
+# async fn example(dev: &mut AsyncFtdiDevice) -> ftdi_nusb::Result<()> {
+let mut stream = dev.start_stream(8, 4).await?;
+while let Some(event) = stream.next().await? {
+    match event {
+        StreamEvent::Data(data) => process(data).await,
+        StreamEvent::Progress(progress) => println!("{} B/s", progress.current_rate),
+    }
+}
+stream.finish().await?;
+# async fn process(_: Vec<u8>) {}
+# Ok(())
+# }
+```
+
+`read_stream_async` is also available when an async callback is more convenient.
+Streaming uses the configured read timeout and reports timeouts and USB transfer
+failures instead of treating them as a clean end-of-stream.
+
 ## WASM / WebUSB Support
 
 The `wasm32-unknown-unknown` target builds with WebUSB support using the WebUSB

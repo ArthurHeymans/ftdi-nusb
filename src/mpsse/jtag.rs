@@ -368,13 +368,17 @@ impl AsyncJtagBus {
     async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
         let mut offset = 0;
+        let mut empty_reads = 0;
         while offset < len {
             let n = dev.read_data(&mut buf[offset..]).await?;
             if n == 0 {
-                return Err(Error::InvalidArgument(
-                    "JTAG read returned fewer bytes than expected",
-                ));
+                empty_reads += 1;
+                if empty_reads >= 10 {
+                    return Err(Error::Timeout(dev.read_timeout()));
+                }
+                continue;
             }
+            empty_reads = 0;
             offset += n;
         }
         Ok(buf)

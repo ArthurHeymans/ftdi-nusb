@@ -110,4 +110,4 @@ pub use async_transfer::{ReadTransferControl, WriteTransferControl};
 #[cfg(not(target_arch = "wasm32"))]
 pub use device_info::{DeviceFilter, find_device, find_devices};
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream::StreamProgress;
+pub use stream::{FtdiStream, StreamEvent, StreamProgress};
