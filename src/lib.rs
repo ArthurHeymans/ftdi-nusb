@@ -34,8 +34,6 @@
 //! - **`Read` / `Write` traits**: Use `FtdiDevice` anywhere `std::io::Read`
 //!   or `std::io::Write` is expected.
 
-#![cfg_attr(not(any(feature = "std", feature = "wasm")), no_std)]
-
 // Always available (pure computation)
 mod baudrate;
 pub mod constants;
@@ -44,24 +42,23 @@ pub mod constants;
 ///
 /// In sync mode, uses `std::thread::sleep`. In WASM async mode, uses
 /// `setTimeout` via a JS Promise. Works in both Window and Worker contexts.
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub(crate) mod sleep_util {
     use core::time::Duration;
 
     /// Sleep for the given duration.
     ///
-    /// - Sync (`is_sync`): blocks the thread with `std::thread::sleep`.
-    /// - Async (WASM): yields via a `setTimeout` Promise.
+    /// - Native targets block the thread with `std::thread::sleep`.
+    /// - WASM targets yield via a `setTimeout` Promise.
     #[maybe_async::maybe_async]
     pub(crate) async fn sleep(duration: Duration) {
         let _ = duration;
 
-        #[cfg(feature = "is_sync")]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             std::thread::sleep(duration);
         }
 
-        #[cfg(all(feature = "wasm", not(feature = "is_sync")))]
+        #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;
 
@@ -88,40 +85,33 @@ pub(crate) mod sleep_util {
         }
     }
 }
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod context;
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod eeprom;
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod error;
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub mod mpsse;
 pub mod types;
 
 // Native-only modules
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod async_transfer;
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod device_info;
-#[cfg(feature = "embedded-hal")]
+#[cfg(all(feature = "embedded-hal", not(target_arch = "wasm32")))]
 pub mod hal;
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod stream;
 
 // ---- Convenience re-exports ----
 
 pub use constants::FTDI_VID;
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub use context::FtdiDevice;
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub use eeprom::FtdiEeprom;
-#[cfg(any(feature = "std", feature = "wasm"))]
 pub use error::{Error, Result};
 pub use types::*;
 
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 pub use async_transfer::{ReadTransferControl, WriteTransferControl};
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 pub use device_info::{DeviceFilter, find_device, find_devices};
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 pub use stream::StreamProgress;

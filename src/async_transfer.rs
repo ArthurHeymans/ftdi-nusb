@@ -5,7 +5,7 @@
 //! `ftdi_write_data_submit` / `ftdi_read_data_submit` / `ftdi_transfer_data_done`
 //! / `ftdi_transfer_data_cancel` from libftdi.
 //!
-//! This module is only available with the `std` feature (native builds).
+//! This module is only available on native targets.
 //!
 //! # Usage
 //!

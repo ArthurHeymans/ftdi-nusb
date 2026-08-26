@@ -4,7 +4,6 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,9 +54,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-      - run: cargo check --target wasm32-unknown-unknown --no-default-features --features wasm
-      - run: cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
-      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features wasm --lib -- -D warnings
+      - run: cargo check --target wasm32-unknown-unknown
+      - run: cargo build --target wasm32-unknown-unknown
+      - run: cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
 
   fmt:
     name: Format

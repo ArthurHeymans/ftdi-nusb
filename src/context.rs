@@ -6,7 +6,7 @@
 
 use core::time::Duration;
 
-#[cfg(feature = "is_sync")]
+#[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 
@@ -26,15 +26,15 @@ const DEFAULT_CHUNKSIZE: usize = 4096;
 
 /// Macro for synchronous/asynchronous endpoint completion.
 ///
-/// In sync mode (`is_sync`), uses `wait_next_complete` with a timeout.
-/// In async mode (WASM), uses `.next_complete().await`.
+/// On native targets, uses `wait_next_complete` with a timeout.
+/// On WASM, uses `.next_complete().await`.
 macro_rules! ep_wait {
     ($ep:expr, $timeout:expr) => {{
-        #[cfg(feature = "is_sync")]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             $ep.wait_next_complete($timeout)
         }
-        #[cfg(not(feature = "is_sync"))]
+        #[cfg(target_arch = "wasm32")]
         {
             Some($ep.next_complete().await)
         }
@@ -48,11 +48,11 @@ macro_rules! ep_wait {
 /// In async mode, we use `.await`.
 macro_rules! nusb_await {
     ($expr:expr) => {{
-        #[cfg(feature = "is_sync")]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             $expr.wait()
         }
-        #[cfg(not(feature = "is_sync"))]
+        #[cfg(target_arch = "wasm32")]
         {
             $expr.await
         }
@@ -110,9 +110,9 @@ pub struct FtdiDevice {
     max_packet_size: usize,
     interface_num: u8,
     usb_index: u16,
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     write_ep: u8, // bulk OUT endpoint address
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     read_ep: u8, // bulk IN endpoint address
 
     // EEPROM
@@ -133,7 +133,7 @@ impl core::fmt::Debug for FtdiDevice {
 
 // ---- Native-only construction / Opening ----
 
-#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
 impl FtdiDevice {
     /// Open the first FTDI device matching the given vendor and product IDs.
     ///
@@ -248,7 +248,7 @@ impl FtdiDevice {
 
 // ---- WASM-only construction ----
 
-#[cfg(all(feature = "wasm", not(feature = "is_sync")))]
+#[cfg(target_arch = "wasm32")]
 impl FtdiDevice {
     /// Show the browser's WebUSB device picker filtered by common FTDI VID/PIDs.
     ///
@@ -401,7 +401,7 @@ impl FtdiDevice {
     /// Open the bulk IN endpoint (device -> host) for reading.
     ///
     /// This is used by the streaming and async modules and should not be called directly.
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn bulk_in_endpoint(
         &self,
     ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>> {
@@ -413,7 +413,7 @@ impl FtdiDevice {
     /// Open the bulk OUT endpoint (host -> device) for writing.
     ///
     /// This is used by the async module and should not be called directly.
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn bulk_out_endpoint(
         &self,
     ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>> {
@@ -423,19 +423,19 @@ impl FtdiDevice {
     }
 
     /// Get the write buffer chunk size (for internal use by async module).
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn writebuffer_chunksize(&self) -> usize {
         self.writebuffer_chunksize
     }
 
     /// Get the read buffer chunk size (for internal use by async module).
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn readbuffer_chunksize(&self) -> usize {
         self.readbuffer_chunksize
     }
 
     /// Drain up to `n` bytes from the internal read buffer (for async module).
-    #[cfg_attr(all(feature = "wasm", not(feature = "std")), allow(dead_code))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn drain_readbuffer(&mut self, max: usize) -> Vec<u8> {
         let n = self.readbuffer_remaining.min(max);
         if n == 0 {
@@ -1132,14 +1132,14 @@ impl FtdiDevice {
 
 // ---- std::io trait implementations (native only) ----
 
-#[cfg(feature = "is_sync")]
+#[cfg(not(target_arch = "wasm32"))]
 impl std::io::Read for FtdiDevice {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.read_data(buf).map_err(std::io::Error::other)
     }
 }
 
-#[cfg(feature = "is_sync")]
+#[cfg(not(target_arch = "wasm32"))]
 impl std::io::Write for FtdiDevice {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.write_data(buf).map_err(std::io::Error::other)
