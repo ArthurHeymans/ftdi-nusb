@@ -12,6 +12,8 @@ categories = ["hardware-support", "embedded"]
 [features]
 default = []
 embedded-hal = ["dep:embedded-hal", "dep:embedded-io"]
+smol = ["nusb/smol"]
+tokio = ["nusb/tokio"]
 
 [package.metadata.docs.rs]
 # WebUSB bindings require the unstable web_sys APIs cfg.
