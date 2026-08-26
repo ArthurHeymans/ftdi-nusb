@@ -19,7 +19,7 @@ all-features = true
 rustc-args = ["--cfg=web_sys_unstable_apis"]
 
 [dependencies]
-nusb = "0.2.6"
+nusb = "0.2.7"
 thiserror = "2"
 log = "0.4"
 
