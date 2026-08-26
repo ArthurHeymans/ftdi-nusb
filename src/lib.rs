@@ -85,6 +85,8 @@ pub(crate) mod sleep_util {
         }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blocking;
 pub mod context;
 pub mod eeprom;
 pub mod error;
@@ -104,7 +106,7 @@ pub mod stream;
 // ---- Convenience re-exports ----
 
 pub use constants::FTDI_VID;
-pub use context::FtdiDevice;
+pub use context::{AsyncFtdiDevice, FtdiDevice};
 pub use eeprom::FtdiEeprom;
 pub use error::{Error, Result};
 pub use types::*;

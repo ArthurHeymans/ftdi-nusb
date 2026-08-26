@@ -142,6 +142,32 @@ Requires a platform supported by [nusb](https://docs.rs/nusb):
 On Linux, you may need to detach the `ftdi_sio` kernel driver. The library
 handles this automatically via nusb's `detach_and_claim_interface()`.
 
+## Native async support
+
+The root [`FtdiDevice`] API remains blocking on native targets. Enable either
+runtime integration feature to use the asynchronous device API:
+
+```toml
+ftdi-nusb = { version = "0.2", features = ["smol"] }
+# or: features = ["tokio"]
+```
+
+```rust,no_run
+use ftdi_nusb::AsyncFtdiDevice;
+
+# async fn example() -> ftdi_nusb::Result<()> {
+let mut dev = AsyncFtdiDevice::open(0x0403, 0x6001).await?;
+dev.set_baudrate(115_200).await?;
+dev.write_all(b"Hello from async Rust!\r\n").await?;
+# Ok(())
+# }
+```
+
+The features only select how nusb offloads blocking operating-system calls
+needed for discovery and opening. USB transfers themselves are
+runtime-independent. When both features are enabled, nusb uses its smol path.
+High-level native MPSSE and `embedded-hal` APIs currently remain blocking.
+
 ## WASM / WebUSB Support
 
 The `wasm32-unknown-unknown` target builds with WebUSB support using the WebUSB
@@ -177,12 +203,15 @@ dev.write_all(b"Hello from WebUSB!\r\n").await?;
 
 ## Feature Flags
 
-| Feature        | Description                          |
-|----------------|--------------------------------------|
+| Feature        | Description                                 |
+|----------------|---------------------------------------------|
 | `embedded-hal` | Native `embedded-hal` trait implementations |
+| `smol`         | Native async via nusb's smol integration    |
+| `tokio`        | Native async via nusb's Tokio integration   |
 
-Native targets use the synchronous API. The `wasm32` target automatically uses
-the asynchronous WebUSB API.
+Native targets expose both the blocking `FtdiDevice` API and the asynchronous
+`AsyncFtdiDevice` API. The `wasm32` target aliases `FtdiDevice` to the async
+implementation automatically.
 
 ## License
 
