@@ -25,8 +25,8 @@ use futures_lite::future::block_on;
 
 use crate::context::FtdiDevice;
 use crate::error::Error;
-use crate::mpsse::MpsseContext;
 use crate::mpsse::i2c::I2cBus;
+use crate::mpsse::{MpsseContext, MpsseSession};
 use crate::mpsse::spi::{SpiDevice, SpiMode};
 
 // ---- Error conversion ----
@@ -135,7 +135,7 @@ impl FtdiSpiDevice {
     ) -> crate::error::Result<Self> {
         let mut dev = crate::blocking::FtdiDevice::open(vendor, product)?.into_async();
         let mut ctx = block_on(MpsseContext::init(&mut dev, clock_hz))?;
-        let spi = block_on(SpiDevice::new(&mut ctx, &mut dev, mode))?;
+        let spi = block_on(async { SpiDevice::new(&mut ctx.session(&mut dev)?, mode).await })?;
         Ok(Self { dev, ctx, spi })
     }
 
@@ -183,25 +183,27 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
 
         let Self { dev, ctx, spi } = self;
         block_on(async {
+            let mut s = ctx.session(dev)?;
+
             // Assert CS at the start of the transaction
-            spi.cs_assert(ctx, dev).await?;
+            spi.cs_assert(&mut s).await?;
 
             let result: crate::error::Result<()> = async {
                 for op in operations.iter_mut() {
                     match op {
                         Operation::Read(buf) => {
-                            let data = spi.read_raw(dev, buf.len()).await?;
+                            let data = spi.read_raw(&mut s, buf.len()).await?;
                             buf.copy_from_slice(&data);
                         }
                         Operation::Write(buf) => {
-                            spi.write_raw(dev, buf).await?;
+                            spi.write_raw(&mut s, buf).await?;
                         }
                         Operation::Transfer(read, write) => {
-                            spi.transfer_into_raw(dev, read, write).await?;
+                            spi.transfer_into_raw(&mut s, read, write).await?;
                         }
                         Operation::TransferInPlace(buf) => {
                             let write = buf.to_vec();
-                            spi.transfer_into_raw(dev, buf, &write).await?;
+                            spi.transfer_into_raw(&mut s, buf, &write).await?;
                         }
                         Operation::DelayNs(ns) => {
                             crate::sleep_util::sleep(std::time::Duration::from_nanos(*ns as u64))
@@ -214,7 +216,8 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
             .await;
 
             // Always deassert CS, even on error
-            let cs_result = spi.cs_deassert(ctx, dev).await;
+            let cs_result = spi.cs_deassert(&mut s).await;
+            let MpsseSession { dev, .. } = s;
 
             if result.is_err() || cs_result.is_err() {
                 dev.mark_recovery_required();
@@ -255,7 +258,7 @@ impl FtdiI2c {
     pub fn open(vendor: u16, product: u16, clock_hz: u32) -> crate::error::Result<Self> {
         let mut dev = crate::blocking::FtdiDevice::open(vendor, product)?.into_async();
         let mut ctx = block_on(MpsseContext::init(&mut dev, clock_hz))?;
-        let i2c = block_on(I2cBus::new(&mut ctx, &mut dev))?;
+        let i2c = block_on(async { I2cBus::new(&mut ctx.session(&mut dev)?).await })?;
         Ok(Self { dev, ctx, i2c })
     }
 
@@ -319,10 +322,11 @@ impl embedded_hal::i2c::I2c for FtdiI2c {
 
         let Self { dev, ctx, i2c } = self;
         block_on(async {
-            i2c.start(ctx, dev).await?;
+            let mut s = ctx.session(dev)?;
+            i2c.start(&mut s).await?;
 
-            if !i2c.write_byte(dev, first_addr).await? {
-                i2c.stop(ctx, dev).await?;
+            if !i2c.write_byte(&mut s, first_addr).await? {
+                i2c.stop(&mut s).await?;
                 return Err(Error::I2cNack("address not acknowledged"));
             }
 
@@ -333,14 +337,14 @@ impl embedded_hal::i2c::I2c for FtdiI2c {
 
                 // If direction changes, issue a repeated START
                 if cur_is_read != prev_is_read {
-                    i2c.start(ctx, dev).await?;
+                    i2c.start(&mut s).await?;
                     let addr_byte = if cur_is_read {
                         (address << 1) | 0x01
                     } else {
                         (address << 1) & 0xFE
                     };
-                    if !i2c.write_byte(dev, addr_byte).await? {
-                        i2c.stop(ctx, dev).await?;
+                    if !i2c.write_byte(&mut s, addr_byte).await? {
+                        i2c.stop(&mut s).await?;
                         return Err(Error::I2cNack("address not acknowledged"));
                     }
                 }
@@ -349,13 +353,13 @@ impl embedded_hal::i2c::I2c for FtdiI2c {
                     Operation::Read(buf) => {
                         for i in 0..buf.len() {
                             let ack = i < buf.len() - 1;
-                            buf[i] = i2c.read_byte(dev, ack).await?;
+                            buf[i] = i2c.read_byte(&mut s, ack).await?;
                         }
                     }
                     Operation::Write(buf) => {
                         for &byte in buf.iter() {
-                            if !i2c.write_byte(dev, byte).await? {
-                                i2c.stop(ctx, dev).await?;
+                            if !i2c.write_byte(&mut s, byte).await? {
+                                i2c.stop(&mut s).await?;
                                 return Err(Error::I2cNack("data byte not acknowledged"));
                             }
                         }
@@ -365,7 +369,7 @@ impl embedded_hal::i2c::I2c for FtdiI2c {
                 prev_is_read = cur_is_read;
             }
 
-            i2c.stop(ctx, dev).await
+            i2c.stop(&mut s).await
         })
     }
 }

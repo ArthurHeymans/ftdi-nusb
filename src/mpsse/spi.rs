@@ -20,25 +20,25 @@
 //!
 //! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 //! let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
-//! let spi = SpiDevice::new(&mut mpsse, dev, SpiMode::Mode0).await?;
+//! let mut s = mpsse.session(dev)?;
+//! let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
 //!
 //! // Write 3 bytes, read 3 bytes (full duplex)
-//! let response = spi.transfer(&mut mpsse, dev, &[0x9F, 0x00, 0x00]).await?;
+//! let response = spi.transfer(&mut s, &[0x9F, 0x00, 0x00]).await?;
 //!
 //! // Write-only (CS automatically asserted/deasserted)
-//! spi.write(&mut mpsse, dev, &[0x06]).await?;
+//! spi.write(&mut s, &[0x06]).await?;
 //!
 //! // Read-only
-//! let data = spi.read(&mut mpsse, dev, 4).await?;
+//! let data = spi.read(&mut s, 4).await?;
 //! # Ok(())
 //! # }
 //! ```
 
 use crate::constants::mpsse;
-use crate::context::FtdiDevice;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
-use super::{MpsseContext, read_exact};
+use super::{MpsseSession, read_exact};
 
 /// Maximum bytes per single MPSSE transfer command (2-byte length field, encoding len-1).
 const MAX_MPSSE_TRANSFER: usize = 65536;
@@ -128,9 +128,21 @@ pub struct SpiDevice {
     dir_mask: u8,
     /// Initial low-byte value (CS deasserted, clock at idle level).
     idle_value: u8,
+    /// Recovery epoch of the device this SPI device was configured on.
+    recovery_epoch: u64,
+    /// Identity of the device this SPI device was configured on.
+    device_id: u64,
 }
 
 impl SpiDevice {
+    fn ensure_current(&self, s: &MpsseSession<'_>) -> Result<()> {
+        if self.device_id == s.dev.device_id() && self.recovery_epoch == s.dev.recovery_epoch() {
+            Ok(())
+        } else {
+            Err(Error::InvalidMpsseContext)
+        }
+    }
+
     /// Create a new SPI device configuration with default CS on ADBUS3.
     ///
     /// Initializes the MPSSE pins for SPI:
@@ -138,12 +150,8 @@ impl SpiDevice {
     /// - ADBUS1 (DO) = MOSI output
     /// - ADBUS2 (DI) = MISO input
     /// - ADBUS3 = CS# output (active low, deasserted on init)
-    pub async fn new(
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        mode: SpiMode,
-    ) -> Result<Self> {
-        Self::with_cs_pin(ctx, dev, mode, 0x08, true, false).await
+    pub async fn new(s: &mut MpsseSession<'_>, mode: SpiMode) -> Result<Self> {
+        Self::with_cs_pin(s, mode, 0x08, true, false).await
     }
 
     /// Create an SPI device with a custom CS pin and options.
@@ -155,8 +163,7 @@ impl SpiDevice {
     ///
     /// `lsb_first` controls the bit order (true = LSB first, false = MSB first).
     pub async fn with_cs_pin(
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        s: &mut MpsseSession<'_>,
         mode: SpiMode,
         cs_pin: u8,
         cs_active_low: bool,
@@ -210,20 +217,19 @@ impl SpiDevice {
             rw_cmd,
             dir_mask,
             idle_value,
+            recovery_epoch: s.dev.recovery_epoch(),
+            device_id: s.dev.device_id(),
         };
 
         // Set initial pin state
-        ctx.set_gpio_low(dev, idle_value, dir_mask).await?;
+        s.set_gpio_low(idle_value, dir_mask).await?;
 
         Ok(spi)
     }
 
     /// Assert the chip-select line (make it active).
-    pub async fn cs_assert(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-    ) -> Result<()> {
+    pub async fn cs_assert(&self, s: &mut MpsseSession<'_>) -> Result<()> {
+        self.ensure_current(s)?;
         if self.cs_pin == 0 {
             return Ok(());
         }
@@ -232,33 +238,30 @@ impl SpiDevice {
         } else {
             self.idle_value | self.cs_pin // drive CS high
         };
-        ctx.set_gpio_low(dev, value, self.dir_mask).await
+        s.set_gpio_low(value, self.dir_mask).await
     }
 
     /// Deassert the chip-select line (make it inactive).
-    pub async fn cs_deassert(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-    ) -> Result<()> {
+    pub async fn cs_deassert(&self, s: &mut MpsseSession<'_>) -> Result<()> {
+        self.ensure_current(s)?;
         if self.cs_pin == 0 {
             return Ok(());
         }
-        ctx.set_gpio_low(dev, self.idle_value, self.dir_mask).await
+        s.set_gpio_low(self.idle_value, self.dir_mask).await
     }
 
     pub(crate) async fn transfer_into_raw(
         &self,
-        dev: &mut FtdiDevice,
+        s: &mut MpsseSession<'_>,
         read: &mut [u8],
         write: &[u8],
     ) -> Result<()> {
         let total_len = read.len().max(write.len());
         for (offset, chunk_len) in io_chunks(total_len) {
             let command = transfer_command(self.rw_cmd, write, offset, chunk_len);
-            dev.write_all(&command).await?;
+            s.dev.write_all(&command).await?;
 
-            let received = read_exact(dev, chunk_len).await?;
+            let received = read_exact(s.dev, chunk_len).await?;
             let read_end = (offset + chunk_len).min(read.len());
             if offset < read_end {
                 read[offset..read_end].copy_from_slice(&received[..read_end - offset]);
@@ -267,26 +270,27 @@ impl SpiDevice {
         Ok(())
     }
 
-    pub(crate) async fn write_raw(&self, dev: &mut FtdiDevice, tx: &[u8]) -> Result<()> {
+    pub(crate) async fn write_raw(&self, s: &mut MpsseSession<'_>, tx: &[u8]) -> Result<()> {
         for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
             let (lo, hi) = encode_len(chunk.len());
             let mut cmd = Vec::with_capacity(chunk.len() + 3);
             cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
             cmd.extend_from_slice(chunk);
-            dev.write_all(&cmd).await?;
+            s.dev.write_all(&cmd).await?;
         }
         Ok(())
     }
 
-    pub(crate) async fn read_raw(&self, dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
+    pub(crate) async fn read_raw(&self, s: &mut MpsseSession<'_>, len: usize) -> Result<Vec<u8>> {
         let mut received = Vec::with_capacity(len);
         let mut remaining = len;
         while remaining > 0 {
             let chunk_len = remaining.min(MAX_MPSSE_IO_CHUNK);
             let (lo, hi) = encode_len(chunk_len);
-            dev.write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
+            s.dev
+                .write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
                 .await?;
-            received.extend(read_exact(dev, chunk_len).await?);
+            received.extend(read_exact(s.dev, chunk_len).await?);
             remaining -= chunk_len;
         }
         Ok(received)
@@ -294,21 +298,16 @@ impl SpiDevice {
 
     /// Full-duplex SPI transfer: simultaneously write `tx` and read the same
     /// number of bytes.
-    pub async fn transfer(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        tx: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub async fn transfer(&self, s: &mut MpsseSession<'_>, tx: &[u8]) -> Result<Vec<u8>> {
         if tx.is_empty() {
             return Ok(Vec::new());
         }
-        ctx.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        self.cs_assert(ctx, dev).await?;
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
+        self.cs_assert(s).await?;
         let mut received = vec![0; tx.len()];
-        let operation = self.transfer_into_raw(dev, &mut received, tx).await;
-        let cleanup = self.cs_deassert(ctx, dev).await;
+        let operation = self.transfer_into_raw(s, &mut received, tx).await;
+        let cleanup = self.cs_deassert(s).await;
         operation?;
         cleanup?;
         guard.disarm();
@@ -316,20 +315,15 @@ impl SpiDevice {
     }
 
     /// Write-only SPI transfer with automatic chip-select handling.
-    pub async fn write(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        tx: &[u8],
-    ) -> Result<()> {
+    pub async fn write(&self, s: &mut MpsseSession<'_>, tx: &[u8]) -> Result<()> {
         if tx.is_empty() {
             return Ok(());
         }
-        ctx.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        self.cs_assert(ctx, dev).await?;
-        let operation = self.write_raw(dev, tx).await;
-        let cleanup = self.cs_deassert(ctx, dev).await;
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
+        self.cs_assert(s).await?;
+        let operation = self.write_raw(s, tx).await;
+        let cleanup = self.cs_deassert(s).await;
         operation?;
         cleanup?;
         guard.disarm();
@@ -337,20 +331,15 @@ impl SpiDevice {
     }
 
     /// Read-only SPI transfer with automatic chip-select handling.
-    pub async fn read(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        len: usize,
-    ) -> Result<Vec<u8>> {
+    pub async fn read(&self, s: &mut MpsseSession<'_>, len: usize) -> Result<Vec<u8>> {
         if len == 0 {
             return Ok(Vec::new());
         }
-        ctx.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        self.cs_assert(ctx, dev).await?;
-        let operation = self.read_raw(dev, len).await;
-        let cleanup = self.cs_deassert(ctx, dev).await;
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
+        self.cs_assert(s).await?;
+        let operation = self.read_raw(s, len).await;
+        let cleanup = self.cs_deassert(s).await;
         let received = operation?;
         cleanup?;
         guard.disarm();
@@ -360,23 +349,22 @@ impl SpiDevice {
     /// Perform a write-then-read SPI transaction with a single CS assertion.
     pub async fn write_read(
         &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
+        s: &mut MpsseSession<'_>,
         tx: &[u8],
         read_len: usize,
     ) -> Result<Vec<u8>> {
         if tx.is_empty() && read_len == 0 {
             return Ok(Vec::new());
         }
-        ctx.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        self.cs_assert(ctx, dev).await?;
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
+        self.cs_assert(s).await?;
         let operation = async {
-            self.write_raw(dev, tx).await?;
-            self.read_raw(dev, read_len).await
+            self.write_raw(s, tx).await?;
+            self.read_raw(s, read_len).await
         }
         .await;
-        let cleanup = self.cs_deassert(ctx, dev).await;
+        let cleanup = self.cs_deassert(s).await;
         let received = operation?;
         cleanup?;
         guard.disarm();
@@ -601,6 +589,8 @@ mod tests {
             rw_cmd: 0,
             dir_mask: 0x0B,
             idle_value: 0x08, // CS high (deasserted), CLK low
+            recovery_epoch: 0,
+            device_id: 0,
         };
 
         let mut cmd = Vec::new();
@@ -625,6 +615,8 @@ mod tests {
             rw_cmd: 0,
             dir_mask: 0x0B,
             idle_value: 0x00, // CS low (deasserted), CLK low
+            recovery_epoch: 0,
+            device_id: 0,
         };
 
         let mut cmd = Vec::new();
@@ -644,6 +636,8 @@ mod tests {
             rw_cmd: 0,
             dir_mask: 0x0B,
             idle_value: 0x08,
+            recovery_epoch: 0,
+            device_id: 0,
         };
 
         let mut cmd = Vec::new();
@@ -663,6 +657,8 @@ mod tests {
             rw_cmd: 0,
             dir_mask: 0x03,
             idle_value: 0x00,
+            recovery_epoch: 0,
+            device_id: 0,
         };
 
         let mut cmd = Vec::new();

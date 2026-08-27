@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use ftdi_nusb::mpsse::{
-    MpsseContext,
+    MpsseContext, MpsseSession,
     spi::{SpiDevice, SpiMode},
 };
 use ftdi_nusb::{FtdiDevice, BitMode, Error, Result};
@@ -117,7 +117,8 @@ fn ft232h_async_spi_loopback() {
         dev.set_write_timeout(Duration::from_secs(2));
 
         let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
-        let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
+        let mut s = mpsse.session(&mut dev)?;
+        let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
 
         for length in [
             1, 4, 257, 510, 511, 1020, 1021, 2040, 2041, 4080, 4081, 4096,
@@ -125,24 +126,25 @@ fn ft232h_async_spi_loopback() {
             let transmitted: Vec<u8> = (0..length)
                 .map(|index| (index as u8).wrapping_mul(73).wrapping_add(19))
                 .collect();
-            let received = spi.transfer(&mut mpsse, &mut dev, &transmitted).await?;
+            let received = spi.transfer(&mut s, &transmitted).await?;
             assert_eq!(
                 received, transmitted,
                 "SPI loopback mismatch at {length} bytes"
             );
             eprintln!("async SPI loopback passed for {length} bytes");
         }
+        let MpsseSession { .. } = s;
 
         dev.recover().await?;
         assert!(matches!(
-            mpsse.set_clock(&mut dev, 2_000_000).await,
+            mpsse.session(&mut dev),
             Err(Error::InvalidMpsseContext)
         ));
         let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
-        let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
+        let mut s = mpsse.session(&mut dev)?;
+        let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
         assert_eq!(
-            spi.transfer(&mut mpsse, &mut dev, b"reinitialized after recovery")
-                .await?,
+            spi.transfer(&mut s, b"reinitialized after recovery").await?,
             b"reinitialized after recovery"
         );
         Ok::<(), ftdi_nusb::Error>(())
@@ -169,9 +171,10 @@ fn ft232h_sync_fifo_timeout_restores_device() {
 
         {
             let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
-            let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
+            let mut s = mpsse.session(&mut dev)?;
+            let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
             let transmitted = b"SPI works after synchronous-FIFO timeout";
-            let received = spi.transfer(&mut mpsse, &mut dev, transmitted).await?;
+            let received = spi.transfer(&mut s, transmitted).await?;
             assert_eq!(received, transmitted);
             eprintln!("synchronous-FIFO timeout cleanup restored MPSSE SPI");
         }
@@ -184,11 +187,13 @@ fn ft232h_sync_fifo_timeout_restores_device() {
         eprintln!("synchronous-FIFO progress callback stopped cleanly");
 
         let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
-        let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
+        let mut s = mpsse.session(&mut dev)?;
+        let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
         let transmitted = b"SPI works after clean synchronous-FIFO finish";
-        let received = spi.transfer(&mut mpsse, &mut dev, transmitted).await?;
+        let received = spi.transfer(&mut s, transmitted).await?;
         assert_eq!(received, transmitted);
         eprintln!("clean synchronous-FIFO finish restored MPSSE SPI");
+        let MpsseSession { .. } = s;
 
         dev.recover().await?;
         Ok::<(), ftdi_nusb::Error>(())

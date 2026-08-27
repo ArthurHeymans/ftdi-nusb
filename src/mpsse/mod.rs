@@ -59,7 +59,11 @@ pub(super) async fn read_exact(dev: &mut FtdiDevice, len: usize) -> Result<Vec<u
 }
 
 /// MPSSE context holding pin state and clock configuration.
-#[derive(Debug, Clone)]
+///
+/// All MPSSE I/O happens through an [`MpsseSession`] obtained from
+/// [`session`](Self::session), which binds this context to the device it was
+/// initialized on for the duration of the borrow.
+#[derive(Debug)]
 pub struct MpsseContext {
     clock_hz: u32,
     is_h_type: bool,
@@ -68,6 +72,17 @@ pub struct MpsseContext {
     gpio_high_value: u8,
     gpio_high_dir: u8,
     recovery_epoch: u64,
+    device_id: u64,
+}
+
+/// An MPSSE context paired with a mutable borrow of its device.
+///
+/// Created by [`MpsseContext::session`]. Validity (device identity and
+/// recovery epoch) is checked once at creation; the exclusive device borrow
+/// guarantees it cannot change while the session exists.
+pub struct MpsseSession<'a> {
+    pub(crate) ctx: &'a mut MpsseContext,
+    pub(crate) dev: &'a mut FtdiDevice,
 }
 
 impl MpsseContext {
@@ -83,6 +98,9 @@ impl MpsseContext {
         }
 
         let guard = dev.begin_stateful_operation()?;
+        // Re-initialization resets clock, GPIO, and engine state, so any
+        // previously created context or bus object is now stale.
+        dev.bump_recovery_epoch();
         dev.set_bitmode(0, BitMode::Reset).await?;
         dev.flush_all().await?;
         dev.set_bitmode(0, BitMode::Mpsse).await?;
@@ -100,6 +118,7 @@ impl MpsseContext {
             gpio_high_value: 0x00,
             gpio_high_dir: 0x00,
             recovery_epoch: dev.recovery_epoch(),
+            device_id: dev.device_id(),
         };
 
         let mut cmd = Vec::with_capacity(16);
@@ -109,10 +128,25 @@ impl MpsseContext {
         }
         dev.write_all(&cmd).await?;
 
-        ctx.set_clock(dev, clock_hz).await?;
+        MpsseSession { ctx: &mut ctx, dev }
+            .set_clock(clock_hz)
+            .await?;
 
         guard.disarm();
         Ok(ctx)
+    }
+
+    /// Borrow this context together with its device for MPSSE I/O.
+    ///
+    /// Fails with [`Error::InvalidMpsseContext`] when `dev` is not the device
+    /// this context was initialized on, or when the device has been recovered
+    /// since initialization.
+    pub fn session<'a>(&'a mut self, dev: &'a mut FtdiDevice) -> Result<MpsseSession<'a>> {
+        if self.device_id != dev.device_id() {
+            return Err(Error::InvalidMpsseContext);
+        }
+        self.ensure_current(dev)?;
+        Ok(MpsseSession { ctx: self, dev })
     }
 
     pub fn clock_hz(&self) -> u32 {
@@ -127,13 +161,20 @@ impl MpsseContext {
         }
     }
 
-    pub async fn set_clock(&mut self, dev: &mut FtdiDevice, clock_hz: u32) -> Result<()> {
-        self.ensure_current(dev)?;
+}
+
+impl MpsseSession<'_> {
+    /// Read-only access to the underlying context state.
+    pub fn ctx(&self) -> &MpsseContext {
+        self.ctx
+    }
+
+    pub async fn set_clock(&mut self, clock_hz: u32) -> Result<()> {
         if clock_hz == 0 {
             return Err(Error::InvalidArgument("clock frequency must be > 0"));
         }
 
-        let max_freq = if self.is_h_type {
+        let max_freq = if self.ctx.is_h_type {
             30_000_000
         } else {
             6_000_000
@@ -147,7 +188,7 @@ impl MpsseContext {
         let mut cmd = Vec::with_capacity(8);
         let actual_clock;
 
-        if self.is_h_type {
+        if self.ctx.is_h_type {
             if clock_hz > 6_000_000 {
                 cmd.push(mpsse::DIS_DIV_5);
                 let divisor = (60_000_000u32 / clock_hz.saturating_mul(2)).saturating_sub(1);
@@ -168,107 +209,128 @@ impl MpsseContext {
             actual_clock = 12_000_000 / ((1 + divisor as u32) * 2);
         }
 
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&cmd).await?;
-        self.clock_hz = actual_clock;
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev.write_all(&cmd).await?;
+        self.ctx.clock_hz = actual_clock;
         guard.disarm();
         Ok(())
     }
 
-    pub async fn enable_3phase_clocking(&self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        if !self.is_h_type {
+    pub async fn enable_3phase_clocking(&mut self) -> Result<()> {
+        if !self.ctx.is_h_type {
             return Err(Error::InvalidArgument(
                 "3-phase clocking only supported on H-type chips",
             ));
         }
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::EN_3_PHASE]).await?;
-        guard.disarm();
-        Ok(())
+        self.write_commands(&[mpsse::EN_3_PHASE]).await
     }
 
-    pub async fn disable_3phase_clocking(&self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        if !self.is_h_type {
+    pub async fn disable_3phase_clocking(&mut self) -> Result<()> {
+        if !self.ctx.is_h_type {
             return Err(Error::InvalidArgument(
                 "3-phase clocking only supported on H-type chips",
             ));
         }
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::DIS_3_PHASE]).await?;
-        guard.disarm();
-        Ok(())
+        self.write_commands(&[mpsse::DIS_3_PHASE]).await
     }
 
-    pub async fn enable_loopback(&self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::LOOPBACK_START]).await?;
-        guard.disarm();
-        Ok(())
+    pub async fn enable_loopback(&mut self) -> Result<()> {
+        self.write_commands(&[mpsse::LOOPBACK_START]).await
     }
 
-    pub async fn disable_loopback(&self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::LOOPBACK_END]).await?;
-        guard.disarm();
-        Ok(())
+    pub async fn disable_loopback(&mut self) -> Result<()> {
+        self.write_commands(&[mpsse::LOOPBACK_END]).await
     }
 
-    pub async fn set_gpio_low(
-        &mut self,
-        dev: &mut FtdiDevice,
-        value: u8,
-        direction: u8,
-    ) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::SET_BITS_LOW, value, direction])
+    pub async fn set_gpio_low(&mut self, value: u8, direction: u8) -> Result<()> {
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev
+            .write_all(&[mpsse::SET_BITS_LOW, value, direction])
             .await?;
-        self.gpio_low_value = value;
-        self.gpio_low_dir = direction;
+        self.ctx.gpio_low_value = value;
+        self.ctx.gpio_low_dir = direction;
         guard.disarm();
         Ok(())
     }
 
-    pub async fn get_gpio_low(&self, dev: &mut FtdiDevice) -> Result<u8> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::GET_BITS_LOW, mpsse::SEND_IMMEDIATE])
+    pub async fn get_gpio_low(&mut self) -> Result<u8> {
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev
+            .write_all(&[mpsse::GET_BITS_LOW, mpsse::SEND_IMMEDIATE])
             .await?;
-        let value = read_exact(dev, 1).await?[0];
+        let value = read_exact(self.dev, 1).await?[0];
         guard.disarm();
         Ok(value)
     }
 
-    pub async fn set_gpio_high(
-        &mut self,
-        dev: &mut FtdiDevice,
-        value: u8,
-        direction: u8,
-    ) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::SET_BITS_HIGH, value, direction])
+    pub async fn set_gpio_high(&mut self, value: u8, direction: u8) -> Result<()> {
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev
+            .write_all(&[mpsse::SET_BITS_HIGH, value, direction])
             .await?;
-        self.gpio_high_value = value;
-        self.gpio_high_dir = direction;
+        self.ctx.gpio_high_value = value;
+        self.ctx.gpio_high_dir = direction;
         guard.disarm();
         Ok(())
     }
 
-    pub async fn get_gpio_high(&self, dev: &mut FtdiDevice) -> Result<u8> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(&[mpsse::GET_BITS_HIGH, mpsse::SEND_IMMEDIATE])
+    pub async fn get_gpio_high(&mut self) -> Result<u8> {
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev
+            .write_all(&[mpsse::GET_BITS_HIGH, mpsse::SEND_IMMEDIATE])
             .await?;
-        let value = read_exact(dev, 1).await?[0];
+        let value = read_exact(self.dev, 1).await?[0];
         guard.disarm();
         Ok(value)
     }
 
+    pub async fn sync_mpsse(&mut self) -> Result<()> {
+        const BOGUS_CMD: u8 = 0xAB;
+        let guard = self.dev.begin_stateful_operation()?;
+        let deadline = ReadDeadline::new(self.dev.read_timeout());
+
+        self.dev
+            .write_all(&[BOGUS_CMD, mpsse::SEND_IMMEDIATE])
+            .await?;
+
+        let mut buf = [0u8; 64];
+        loop {
+            if deadline.expired() {
+                return Err(Error::Timeout(self.dev.read_timeout()));
+            }
+            let n = self.dev.read_data(&mut buf).await?;
+            if n >= 2 {
+                for i in 0..n - 1 {
+                    if buf[i] == MpsseContext::BAD_COMMAND && buf[i + 1] == BOGUS_CMD {
+                        guard.disarm();
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn command_response(&mut self, cmd: &[u8], read_len: usize) -> Result<Vec<u8>> {
+        let guard = self.dev.begin_stateful_operation()?;
+        let mut full_cmd = Vec::with_capacity(cmd.len() + 1);
+        full_cmd.extend_from_slice(cmd);
+        full_cmd.push(mpsse::SEND_IMMEDIATE);
+        self.dev.write_all(&full_cmd).await?;
+
+        let response = read_exact(self.dev, read_len).await?;
+        guard.disarm();
+        Ok(response)
+    }
+
+    pub async fn write_commands(&mut self, cmd: &[u8]) -> Result<()> {
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev.write_all(cmd).await?;
+        guard.disarm();
+        Ok(())
+    }
+}
+
+impl MpsseContext {
     pub fn gpio_low_dir(&self) -> u8 {
         self.gpio_low_dir
     }
@@ -305,57 +367,6 @@ impl MpsseContext {
         Ok(())
     }
 
-    pub async fn sync_mpsse(&self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        const BOGUS_CMD: u8 = 0xAB;
-        let guard = dev.begin_stateful_operation()?;
-        let deadline = ReadDeadline::new(dev.read_timeout());
-
-        dev.write_all(&[BOGUS_CMD, mpsse::SEND_IMMEDIATE]).await?;
-
-        let mut buf = [0u8; 64];
-        loop {
-            if deadline.expired() {
-                return Err(Error::Timeout(dev.read_timeout()));
-            }
-            let n = dev.read_data(&mut buf).await?;
-            if n >= 2 {
-                for i in 0..n - 1 {
-                    if buf[i] == Self::BAD_COMMAND && buf[i + 1] == BOGUS_CMD {
-                        guard.disarm();
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    pub async fn command_response(
-        &self,
-        dev: &mut FtdiDevice,
-        cmd: &[u8],
-        read_len: usize,
-    ) -> Result<Vec<u8>> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        let mut full_cmd = Vec::with_capacity(cmd.len() + 1);
-        full_cmd.extend_from_slice(cmd);
-        full_cmd.push(mpsse::SEND_IMMEDIATE);
-        dev.write_all(&full_cmd).await?;
-
-        let response = read_exact(dev, read_len).await?;
-        guard.disarm();
-        Ok(response)
-    }
-
-    pub async fn write_commands(&self, dev: &mut FtdiDevice, cmd: &[u8]) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
-        dev.write_all(cmd).await?;
-        guard.disarm();
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(crate) fn test_new(is_h_type: bool) -> Self {
         Self {
@@ -366,6 +377,7 @@ impl MpsseContext {
             gpio_high_value: 0x00,
             gpio_high_dir: 0x00,
             recovery_epoch: 0,
+            device_id: 0,
         }
     }
 }
