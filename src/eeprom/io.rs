@@ -1,7 +1,7 @@
 //! EEPROM USB I/O operations: reading, writing, and erasing the physical EEPROM.
 
 use crate::constants::*;
-use crate::context::FtdiDevice;
+use crate::context::{FtdiDevice, RecoveryAction};
 use crate::error::{Error, Result};
 use crate::types::ChipType;
 
@@ -14,8 +14,11 @@ impl FtdiDevice {
     /// 256-byte EEPROM. The result is stored in `self.eeprom.buf`.
     ///
     /// After reading, the EEPROM size is auto-detected by comparing halves
-    /// of the buffer.
+    /// of the buffer. The new image is committed only after every location has
+    /// been read, so cancellation cannot leave a mixed old/new software image.
     pub async fn read_eeprom(&mut self) -> Result<()> {
+        let guard = self.begin_stateful_operation()?;
+        let mut buf = [0u8; FTDI_MAX_EEPROM_SIZE];
         for i in 0..(FTDI_MAX_EEPROM_SIZE / 2) {
             let data = self
                 .control_in(SIO_READ_EEPROM_REQUEST, 0, i as u16, 2)
@@ -23,30 +26,26 @@ impl FtdiDevice {
             if data.len() < 2 {
                 return Err(Error::Eeprom("EEPROM read failed: short transfer".into()));
             }
-            self.eeprom.buf[i * 2] = data[0];
-            self.eeprom.buf[i * 2 + 1] = data[1];
+            buf[i * 2] = data[0];
+            buf[i * 2 + 1] = data[1];
         }
 
         // Auto-detect EEPROM size (matching libftdi's ftdi_read_eeprom logic)
-        if self.chip_type() == ChipType::Ft232R {
-            self.eeprom.size = 0x80;
+        let size = if self.chip_type() == ChipType::Ft232R {
+            0x80
+        } else if buf.iter().all(|&b| b == 0xFF) {
+            -1 // Blank EEPROM
+        } else if buf[..0x80] == buf[0x80..0x100] {
+            0x80 // First half equals second half -> 128 bytes (93x56 wrap)
+        } else if buf[..0x40] == buf[0x40..0x80] {
+            0x40 // First quarter equals second quarter -> 64 bytes (93x46 wrap)
         } else {
-            let buf = &self.eeprom.buf;
-            // Check for blank EEPROM: last byte is 0xFF and it's the last occurrence
-            // (C uses strrchr to find last 0xFF position == end of buffer)
-            if buf[FTDI_MAX_EEPROM_SIZE - 1] == 0xFF && buf.iter().all(|&b| b == 0xFF) {
-                self.eeprom.size = -1; // Blank EEPROM
-            } else if buf[..0x80] == buf[0x80..0x100] {
-                // First half equals second half -> 128 bytes (93x56 wrap)
-                self.eeprom.size = 0x80;
-            } else if buf[..0x40] == buf[0x40..0x80] {
-                // First quarter equals second quarter -> 64 bytes (93x46 wrap)
-                self.eeprom.size = 0x40;
-            } else {
-                self.eeprom.size = 0x100;
-            }
-        }
+            0x100
+        };
 
+        self.eeprom.buf = buf;
+        self.eeprom.size = size;
+        guard.disarm();
         Ok(())
     }
 
@@ -55,6 +54,9 @@ impl FtdiDevice {
     /// The EEPROM must have been initialized (via `eeprom_build` or manual
     /// setup). Performs the same initialization sequence observed from FTDI's
     /// MProg tool.
+    /// If this future is cancelled mid-write, the device is poisoned and
+    /// [`recover`](Self::recover) rewrites the complete retained image before
+    /// returning the device to service.
     pub async fn write_eeprom(&mut self) -> Result<()> {
         if !self.eeprom.initialized_for_connected_device {
             return Err(Error::Eeprom(
@@ -65,29 +67,11 @@ impl FtdiDevice {
         if self.eeprom.size <= 0 {
             return Err(Error::Eeprom("invalid EEPROM size".into()));
         }
-        let eeprom_size = self.eeprom.size as usize;
-        let chip_type = self.chip_type();
-
-        // Initialization sequence (from MProg traces)
-        self.usb_reset().await?;
-        let _ = self.poll_modem_status().await;
-        let _ = self.set_latency_timer(0x77).await;
-
-        for i in 0..eeprom_size / 2 {
-            // Skip reserved area on FT230X
-            if chip_type == ChipType::Ft230X && i == 0x40 {
-                continue;
-            }
-            if chip_type == ChipType::Ft230X && (0x40..0x50).contains(&i) {
-                continue;
-            }
-
-            let val = (self.eeprom.buf[i * 2] as u16) | ((self.eeprom.buf[i * 2 + 1] as u16) << 8);
-
-            self.control_out(SIO_WRITE_EEPROM_REQUEST, val, i as u16)
-                .await?;
-        }
-
+        let guard = self.begin_stateful_operation()?;
+        self.set_recovery_action(RecoveryAction::RewriteEeprom);
+        self.write_eeprom_image().await?;
+        self.clear_recovery_action();
+        guard.disarm();
         Ok(())
     }
 
@@ -97,6 +81,9 @@ impl FtdiDevice {
     /// word wraparound test (93x46 vs 93x56 vs 93x66).
     ///
     /// Not supported on FT232R/FT245R (internal EEPROM) or FT230X (MTP).
+    /// If this future is cancelled between the wraparound test and the final
+    /// erase, the device is poisoned and [`recover`](Self::recover) repeats the
+    /// detection and cleanup sequence.
     pub async fn erase_eeprom(&mut self) -> Result<()> {
         let chip_type = self.chip_type();
 
@@ -105,32 +92,11 @@ impl FtdiDevice {
             return Ok(());
         }
 
-        self.control_out(SIO_ERASE_EEPROM_REQUEST, 0, 0).await?;
-
-        // Detect EEPROM chip type via wraparound test
-        self.control_out(SIO_WRITE_EEPROM_REQUEST, MAGIC, 0xC0)
-            .await?;
-
-        let val = self.read_eeprom_location(0x00).await?;
-        if val == MAGIC {
-            self.eeprom.chip = 0x46; // 93x46
-        } else {
-            let val = self.read_eeprom_location(0x40).await?;
-            if val == MAGIC {
-                self.eeprom.chip = 0x56; // 93x56
-            } else {
-                let val = self.read_eeprom_location(0xC0).await?;
-                if val == MAGIC {
-                    self.eeprom.chip = 0x66; // 93x66
-                } else {
-                    self.eeprom.chip = -1;
-                }
-            }
-        }
-
-        // Erase again to clean up the magic word
-        self.control_out(SIO_ERASE_EEPROM_REQUEST, 0, 0).await?;
-
+        let guard = self.begin_stateful_operation()?;
+        self.set_recovery_action(RecoveryAction::EraseEeprom);
+        self.erase_eeprom_and_detect().await?;
+        self.clear_recovery_action();
+        guard.disarm();
         Ok(())
     }
 
@@ -198,17 +164,74 @@ impl FtdiDevice {
         // For FT230X, read factory data area (0x40-0x4F) from the device
         // so it's included in the checksum calculation.
         if chip_type == ChipType::Ft230X {
+            let guard = self.begin_stateful_operation()?;
+            let mut buf = self.eeprom.buf;
             for i in 0x40..0x50u16 {
-                if let Ok(data) = self.control_in(SIO_READ_EEPROM_REQUEST, 0, i, 2).await {
-                    if data.len() >= 2 {
-                        self.eeprom.buf[(i as usize) * 2] = data[0];
-                        self.eeprom.buf[(i as usize) * 2 + 1] = data[1];
-                    }
+                let data = self.control_in(SIO_READ_EEPROM_REQUEST, 0, i, 2).await?;
+                if data.len() < 2 {
+                    return Err(Error::Eeprom(
+                        "FT230X factory-area read failed: short transfer".into(),
+                    ));
                 }
+                buf[(i as usize) * 2] = data[0];
+                buf[(i as usize) * 2 + 1] = data[1];
             }
+            self.eeprom.buf = buf;
+            guard.disarm();
         }
 
         super::build::build(&mut self.eeprom, chip_type)
+    }
+
+    async fn write_eeprom_image(&mut self) -> Result<()> {
+        let eeprom_size = self.eeprom.size as usize;
+        let chip_type = self.chip_type();
+
+        // Initialization sequence (from MProg traces)
+        self.usb_reset().await?;
+        let _ = self.poll_modem_status().await;
+        let _ = self.set_latency_timer(0x77).await;
+
+        for i in 0..eeprom_size / 2 {
+            // Skip reserved area on FT230X
+            if chip_type == ChipType::Ft230X && (0x40..0x50).contains(&i) {
+                continue;
+            }
+
+            let val = (self.eeprom.buf[i * 2] as u16) | ((self.eeprom.buf[i * 2 + 1] as u16) << 8);
+            self.control_out(SIO_WRITE_EEPROM_REQUEST, val, i as u16)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn erase_eeprom_and_detect(&mut self) -> Result<()> {
+        self.control_out(SIO_ERASE_EEPROM_REQUEST, 0, 0).await?;
+        self.control_out(SIO_WRITE_EEPROM_REQUEST, MAGIC, 0xC0)
+            .await?;
+
+        self.eeprom.chip = if self.read_eeprom_location(0x00).await? == MAGIC {
+            0x46
+        } else if self.read_eeprom_location(0x40).await? == MAGIC {
+            0x56
+        } else if self.read_eeprom_location(0xC0).await? == MAGIC {
+            0x66
+        } else {
+            -1
+        };
+
+        // Erase again to clean up the magic word.
+        self.control_out(SIO_ERASE_EEPROM_REQUEST, 0, 0).await
+    }
+
+    pub(crate) async fn recover_eeprom_action(&mut self) -> Result<()> {
+        match self.recovery_action() {
+            RecoveryAction::None => return Ok(()),
+            RecoveryAction::RewriteEeprom => self.write_eeprom_image().await?,
+            RecoveryAction::EraseEeprom => self.erase_eeprom_and_detect().await?,
+        }
+        self.clear_recovery_action();
+        Ok(())
     }
 
     /// Initialize the EEPROM with chip-appropriate defaults.

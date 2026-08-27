@@ -178,12 +178,16 @@ path. The synchronous `embedded-hal` adapters drive the async implementation
 with an internal `block_on`.
 
 Async reads preserve an in-flight USB read when their future is cancelled, so
-the next read resumes without silently discarding serial input. Writes may have
-partially completed when cancelled. Stateful protocol or streaming sessions
-should be finished explicitly; call `FtdiDevice::recover().await` after
-dropping an unfinished session.
+the next read resumes without silently discarding serial input. A cancelled
+write may have partially completed and poisons the device so its pending USB
+transfer cannot cross a later flush or mode change. Cancelled stateful protocol
+operations and dropped streaming sessions likewise return
+`Error::RecoveryRequired` from subsequent I/O until
+`FtdiDevice::recover().await` succeeds. Recovery completes interrupted EEPROM
+writes or erases, invalidates existing MPSSE contexts and bus objects, and
+requires MPSSE users to initialize them again.
 
-### Async streaming
+### Async streaming (native only)
 
 ```rust,no_run
 use ftdi_nusb::{FtdiDevice, StreamEvent};

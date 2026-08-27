@@ -36,9 +36,9 @@
 
 use crate::constants::mpsse;
 use crate::context::FtdiDevice;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
-use super::MpsseContext;
+use super::{MpsseContext, read_exact};
 
 /// Maximum bytes per single MPSSE transfer command (2-byte length field, encoding len-1).
 const MAX_MPSSE_TRANSFER: usize = 65536;
@@ -46,24 +46,24 @@ const MAX_MPSSE_TRANSFER: usize = 65536;
 /// before the host queues the corresponding USB read.
 const MAX_MPSSE_IO_CHUNK: usize = 1024;
 
-/// Read exactly `len` bytes from the MPSSE, returning an error on short reads.
-async fn read_exact(dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; len];
-    let mut offset = 0;
-    let mut empty_reads = 0;
-    while offset < len {
-        let n = dev.read_data(&mut buf[offset..]).await?;
-        if n == 0 {
-            empty_reads += 1;
-            if empty_reads >= 10 {
-                return Err(Error::Timeout(dev.read_timeout()));
-            }
-            continue;
-        }
-        empty_reads = 0;
-        offset += n;
+fn io_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
+    (0..total).step_by(MAX_MPSSE_IO_CHUNK).map(move |offset| {
+        let len = (total - offset).min(MAX_MPSSE_IO_CHUNK);
+        (offset, len)
+    })
+}
+
+fn transfer_command(opcode: u8, write: &[u8], offset: usize, len: usize) -> Vec<u8> {
+    let (lo, hi) = encode_len(len);
+    let mut command = Vec::with_capacity(len + 4);
+    command.extend_from_slice(&[opcode, lo, hi]);
+    let write_end = (offset + len).min(write.len());
+    if offset < write_end {
+        command.extend_from_slice(&write[offset..write_end]);
     }
-    Ok(buf)
+    command.resize(3 + len, 0);
+    command.push(mpsse::SEND_IMMEDIATE);
+    command
 }
 
 /// Encode a chunk length into the 2-byte MPSSE length field (len-1, little-endian).
@@ -235,12 +235,53 @@ impl SpiDevice {
         ctx.set_gpio_low(dev, self.idle_value, self.dir_mask).await
     }
 
+    pub(crate) async fn transfer_into_raw(
+        &self,
+        dev: &mut FtdiDevice,
+        read: &mut [u8],
+        write: &[u8],
+    ) -> Result<()> {
+        let total_len = read.len().max(write.len());
+        for (offset, chunk_len) in io_chunks(total_len) {
+            let command = transfer_command(self.rw_cmd, write, offset, chunk_len);
+            dev.write_all(&command).await?;
+
+            let received = read_exact(dev, chunk_len).await?;
+            let read_end = (offset + chunk_len).min(read.len());
+            if offset < read_end {
+                read[offset..read_end].copy_from_slice(&received[..read_end - offset]);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn write_raw(&self, dev: &mut FtdiDevice, tx: &[u8]) -> Result<()> {
+        for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
+            let (lo, hi) = encode_len(chunk.len());
+            let mut cmd = Vec::with_capacity(chunk.len() + 3);
+            cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
+            cmd.extend_from_slice(chunk);
+            dev.write_all(&cmd).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn read_raw(&self, dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
+        let mut received = Vec::with_capacity(len);
+        let mut remaining = len;
+        while remaining > 0 {
+            let chunk_len = remaining.min(MAX_MPSSE_IO_CHUNK);
+            let (lo, hi) = encode_len(chunk_len);
+            dev.write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
+                .await?;
+            received.extend(read_exact(dev, chunk_len).await?);
+            remaining -= chunk_len;
+        }
+        Ok(received)
+    }
+
     /// Full-duplex SPI transfer: simultaneously write `tx` and read the same
     /// number of bytes.
-    ///
-    /// Read-producing commands are bounded and drained incrementally while CS
-    /// remains asserted, preventing the FTDI MPSSE output FIFO from deadlocking
-    /// large transfers.
     pub async fn transfer(
         &self,
         ctx: &mut MpsseContext,
@@ -250,32 +291,19 @@ impl SpiDevice {
         if tx.is_empty() {
             return Ok(Vec::new());
         }
-
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         self.cs_assert(ctx, dev).await?;
-        let mut received = Vec::with_capacity(tx.len());
-        let operation = async {
-            for chunk in tx.chunks(MAX_MPSSE_IO_CHUNK) {
-                let (lo, hi) = encode_len(chunk.len());
-                let mut cmd = Vec::with_capacity(chunk.len() + 4);
-                cmd.extend_from_slice(&[self.rw_cmd, lo, hi]);
-                cmd.extend_from_slice(chunk);
-                cmd.push(mpsse::SEND_IMMEDIATE);
-                dev.write_all(&cmd).await?;
-                received.extend(read_exact(dev, chunk.len()).await?);
-            }
-            Ok::<(), Error>(())
-        }
-        .await;
+        let mut received = vec![0; tx.len()];
+        let operation = self.transfer_into_raw(dev, &mut received, tx).await;
         let cleanup = self.cs_deassert(ctx, dev).await;
         operation?;
         cleanup?;
+        guard.disarm();
         Ok(received)
     }
 
-    /// Write-only SPI transfer.
-    ///
-    /// CS is automatically asserted before and deasserted after the transfer.
-    /// Large transfers are split into MPSSE commands within one CS assertion.
+    /// Write-only SPI transfer with automatic chip-select handling.
     pub async fn write(
         &self,
         ctx: &mut MpsseContext,
@@ -285,28 +313,18 @@ impl SpiDevice {
         if tx.is_empty() {
             return Ok(());
         }
-
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         self.cs_assert(ctx, dev).await?;
-        let operation = async {
-            for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
-                let (lo, hi) = encode_len(chunk.len());
-                let mut cmd = Vec::with_capacity(chunk.len() + 3);
-                cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
-                cmd.extend_from_slice(chunk);
-                dev.write_all(&cmd).await?;
-            }
-            Ok::<(), Error>(())
-        }
-        .await;
+        let operation = self.write_raw(dev, tx).await;
         let cleanup = self.cs_deassert(ctx, dev).await;
         operation?;
-        cleanup
+        cleanup?;
+        guard.disarm();
+        Ok(())
     }
 
-    /// Read-only SPI transfer.
-    ///
-    /// CS is automatically asserted before and deasserted after the transfer.
-    /// Read-producing commands are drained incrementally.
+    /// Read-only SPI transfer with automatic chip-select handling.
     pub async fn read(
         &self,
         ctx: &mut MpsseContext,
@@ -316,25 +334,14 @@ impl SpiDevice {
         if len == 0 {
             return Ok(Vec::new());
         }
-
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         self.cs_assert(ctx, dev).await?;
-        let mut received = Vec::with_capacity(len);
-        let operation = async {
-            let mut remaining = len;
-            while remaining > 0 {
-                let chunk_len = remaining.min(MAX_MPSSE_IO_CHUNK);
-                let (lo, hi) = encode_len(chunk_len);
-                dev.write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
-                    .await?;
-                received.extend(read_exact(dev, chunk_len).await?);
-                remaining -= chunk_len;
-            }
-            Ok::<(), Error>(())
-        }
-        .await;
+        let operation = self.read_raw(dev, len).await;
         let cleanup = self.cs_deassert(ctx, dev).await;
-        operation?;
+        let received = operation?;
         cleanup?;
+        guard.disarm();
         Ok(received)
     }
 
@@ -349,33 +356,18 @@ impl SpiDevice {
         if tx.is_empty() && read_len == 0 {
             return Ok(Vec::new());
         }
-
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         self.cs_assert(ctx, dev).await?;
-        let mut received = Vec::with_capacity(read_len);
         let operation = async {
-            for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
-                let (lo, hi) = encode_len(chunk.len());
-                let mut cmd = Vec::with_capacity(chunk.len() + 3);
-                cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
-                cmd.extend_from_slice(chunk);
-                dev.write_all(&cmd).await?;
-            }
-
-            let mut remaining = read_len;
-            while remaining > 0 {
-                let chunk_len = remaining.min(MAX_MPSSE_IO_CHUNK);
-                let (lo, hi) = encode_len(chunk_len);
-                dev.write_all(&[self.read_cmd, lo, hi, mpsse::SEND_IMMEDIATE])
-                    .await?;
-                received.extend(read_exact(dev, chunk_len).await?);
-                remaining -= chunk_len;
-            }
-            Ok::<(), Error>(())
+            self.write_raw(dev, tx).await?;
+            self.read_raw(dev, read_len).await
         }
         .await;
         let cleanup = self.cs_deassert(ctx, dev).await;
-        operation?;
+        let received = operation?;
         cleanup?;
+        guard.disarm();
         Ok(received)
     }
 
@@ -532,6 +524,31 @@ mod tests {
     }
 
     // ---- encode_len tests ----
+
+    #[test]
+    fn io_chunk_plan_bounds_unequal_transfers() {
+        assert!(io_chunks(0).next().is_none());
+        assert_eq!(
+            io_chunks(1025).collect::<Vec<_>>(),
+            vec![(0, 1024), (1024, 1)]
+        );
+        assert_eq!(io_chunks(5).map(|(_, len)| len).sum::<usize>(), 5);
+    }
+
+    #[test]
+    fn unequal_transfer_commands_pad_missing_write_bytes() {
+        let command = transfer_command(0x31, &[0xaa, 0xbb], 0, 4);
+        assert_eq!(
+            command,
+            vec![0x31, 3, 0, 0xaa, 0xbb, 0, 0, mpsse::SEND_IMMEDIATE]
+        );
+
+        let second_chunk = transfer_command(0x31, &[1, 2, 3], 2, 3);
+        assert_eq!(
+            second_chunk,
+            vec![0x31, 2, 0, 3, 0, 0, mpsse::SEND_IMMEDIATE]
+        );
+    }
 
     #[test]
     fn encode_len_one_byte() {
