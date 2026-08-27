@@ -29,7 +29,6 @@ verified line-by-line against the original C source.
   - **I2C** — bit-banged master with 3-phase clocking, ACK/NACK detection
   - **JTAG** — TAP state machine navigation, TDI/TDO shifting, IR/DR scan
 - **EEPROM** — read, write, erase, build, decode with chip-aware defaults for all chip types
-- **Async transfers** — non-blocking USB read/write with submit/complete pattern
 - **Streaming** — high-throughput continuous reads via concurrent USB transfers (FT2232H/FT232H)
 - **Device discovery** — enumerate and filter by VID/PID/serial/description
 
@@ -122,7 +121,6 @@ println!("Product: {:?}", eeprom.product);
 | EEPROM build/decode            | Yes         | Yes                    |
 | EEPROM init defaults           | Yes         | Yes                    |
 | Streaming (sync FIFO)          | Yes         | Yes                    |
-| Async transfers                | Yes         | Yes                    |
 | Multi-interface (A/B/C/D)      | Yes         | Yes                    |
 | Device discovery & filtering   | Yes         | Yes                    |
 | Bad-command detection (0xFA)   | No          | Yes                    |

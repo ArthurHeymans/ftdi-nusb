@@ -61,30 +61,6 @@ impl FtdiDevice {
     pub(crate) fn as_async_mut(&mut self) -> &mut AsyncFtdiDevice {
         &mut self.0
     }
-
-    pub(crate) fn bulk_in_endpoint(
-        &self,
-    ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>> {
-        self.0.bulk_in_endpoint()
-    }
-
-    pub(crate) fn bulk_out_endpoint(
-        &self,
-    ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>> {
-        self.0.bulk_out_endpoint()
-    }
-
-    pub(crate) fn writebuffer_chunksize(&self) -> usize {
-        self.0.writebuffer_chunksize()
-    }
-
-    pub(crate) fn readbuffer_chunksize(&self) -> usize {
-        self.0.readbuffer_chunksize()
-    }
-
-    pub(crate) fn drain_readbuffer(&mut self, max: usize) -> Vec<u8> {
-        self.0.drain_readbuffer(max)
-    }
 }
 
 impl AsyncFtdiDevice {

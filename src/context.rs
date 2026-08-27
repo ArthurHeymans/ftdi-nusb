@@ -205,10 +205,6 @@ pub struct AsyncFtdiDevice {
     max_packet_size: usize,
     interface_num: u8,
     usb_index: u16,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    write_ep: u8, // bulk OUT endpoint address
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    read_ep: u8, // bulk IN endpoint address
 
     // EEPROM
     pub(crate) eeprom: FtdiEeprom,
@@ -281,8 +277,6 @@ impl AsyncFtdiDevice {
             max_packet_size,
             interface_num: config.interface_num,
             usb_index,
-            write_ep: config.write_ep,
-            read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
@@ -437,8 +431,6 @@ impl AsyncFtdiDevice {
             max_packet_size,
             interface_num: config.interface_num,
             usb_index,
-            write_ep: config.write_ep,
-            read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
@@ -560,8 +552,6 @@ impl AsyncFtdiDevice {
             max_packet_size,
             interface_num: config.interface_num,
             usb_index,
-            write_ep: config.write_ep,
-            read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
@@ -650,55 +640,6 @@ impl AsyncFtdiDevice {
         self.bitbang_enabled = false;
         self.bitbang_mode = BitMode::Reset;
         self.mark_recovery_required();
-    }
-
-    /// Open the bulk IN endpoint (device -> host) for reading.
-    ///
-    /// This is used by the streaming and async modules and should not be called directly.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn bulk_in_endpoint(
-        &self,
-    ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>> {
-        self.interface
-            .endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(self.read_ep)
-            .map_err(Error::Usb)
-    }
-
-    /// Open the bulk OUT endpoint (host -> device) for writing.
-    ///
-    /// This is used by the async module and should not be called directly.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn bulk_out_endpoint(
-        &self,
-    ) -> Result<nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>> {
-        self.interface
-            .endpoint::<nusb::transfer::Bulk, nusb::transfer::Out>(self.write_ep)
-            .map_err(Error::Usb)
-    }
-
-    /// Get the write buffer chunk size (for internal use by async module).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn writebuffer_chunksize(&self) -> usize {
-        self.writebuffer_chunksize
-    }
-
-    /// Get the read buffer chunk size (for internal use by async module).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn readbuffer_chunksize(&self) -> usize {
-        self.readbuffer_chunksize
-    }
-
-    /// Drain up to `n` bytes from the internal read buffer (for async module).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn drain_readbuffer(&mut self, max: usize) -> Vec<u8> {
-        let n = self.readbuffer_remaining.min(max);
-        if n == 0 {
-            return Vec::new();
-        }
-        let data = self.readbuffer[self.readbuffer_offset..self.readbuffer_offset + n].to_vec();
-        self.readbuffer_remaining -= n;
-        self.readbuffer_offset += n;
-        data
     }
 
     /// Send a vendor OUT control transfer to the device.

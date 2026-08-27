@@ -25,8 +25,6 @@
 //!   SPI/I2C/JTAG.
 //! - **High-level MPSSE**: SPI master and I2C master with typed APIs
 //!   ([`mpsse::spi`], [`mpsse::i2c`]).
-//! - **Async transfers**: Submit non-blocking USB reads/writes and wait
-//!   for completion later ([`async_transfer`]).
 //! - **EEPROM**: Read, write, erase, decode, and build EEPROM images with
 //!   chip-aware defaults.
 //! - **Streaming**: High-throughput continuous reads via concurrent USB
@@ -89,8 +87,6 @@ pub mod types;
 
 // Native-only modules
 #[cfg(not(target_arch = "wasm32"))]
-pub mod async_transfer;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod device_info;
 #[cfg(all(feature = "embedded-hal", not(target_arch = "wasm32")))]
 pub mod hal;
@@ -105,8 +101,6 @@ pub use eeprom::FtdiEeprom;
 pub use error::{Error, Result};
 pub use types::*;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use async_transfer::{ReadTransferControl, WriteTransferControl};
 #[cfg(not(target_arch = "wasm32"))]
 pub use device_info::{DeviceFilter, find_device, find_devices};
 #[cfg(not(target_arch = "wasm32"))]
