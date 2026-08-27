@@ -14,28 +14,28 @@
 //! # Example
 //!
 //! ```no_run
-//! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, gpio::{GpioPin, GpioBank}}};
+//! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, gpio::{GpioBank, GpioPin}}};
 //!
 //! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 //! let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
+//! let mut s = mpsse.session(dev)?;
 //!
 //! // Configure ADBUS4 as output, drive high
 //! let mut pin = GpioPin::new(GpioBank::Low, 4);
-//! pin.set_output(&mut mpsse, dev, true).await?;
+//! pin.set_output(&mut s, true).await?;
 //!
 //! // Read pin state
-//! let state = pin.read(&mpsse, dev).await?;
+//! let state = pin.read(&mut s).await?;
 //!
 //! // Set as input
-//! pin.set_input(&mut mpsse, dev).await?;
+//! pin.set_input(&mut s).await?;
 //! # Ok(())
 //! # }
 //! ```
 
-use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 
-use super::MpsseContext;
+use super::{MpsseContext, MpsseSession};
 
 /// GPIO bank selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,94 +113,84 @@ impl GpioPin {
     /// Configure this pin as an output and set its initial value.
     ///
     /// `high` sets the pin high (true) or low (false).
-    pub async fn set_output(
-        &mut self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        high: bool,
-    ) -> Result<()> {
+    pub async fn set_output(&mut self, s: &mut MpsseSession<'_>, high: bool) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
-                let dir = ctx.gpio_low_dir() | self.mask;
-                let mut val = ctx.gpio_low_value();
+                let dir = s.ctx().gpio_low_dir() | self.mask;
+                let mut val = s.ctx().gpio_low_value();
                 if high {
                     val |= self.mask;
                 } else {
                     val &= !self.mask;
                 }
-                ctx.set_gpio_low(dev, val, dir).await
+                s.set_gpio_low(val, dir).await
             }
             GpioBank::High => {
-                let dir = ctx.gpio_high_dir() | self.mask;
-                let mut val = ctx.gpio_high_value();
+                let dir = s.ctx().gpio_high_dir() | self.mask;
+                let mut val = s.ctx().gpio_high_value();
                 if high {
                     val |= self.mask;
                 } else {
                     val &= !self.mask;
                 }
-                ctx.set_gpio_high(dev, val, dir).await
+                s.set_gpio_high(val, dir).await
             }
         }
     }
 
     /// Configure this pin as an input (high-impedance).
-    pub async fn set_input(&mut self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn set_input(&mut self, s: &mut MpsseSession<'_>) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
-                let dir = ctx.gpio_low_dir() & !self.mask;
-                let val = ctx.gpio_low_value();
-                ctx.set_gpio_low(dev, val, dir).await
+                let dir = s.ctx().gpio_low_dir() & !self.mask;
+                let val = s.ctx().gpio_low_value();
+                s.set_gpio_low(val, dir).await
             }
             GpioBank::High => {
-                let dir = ctx.gpio_high_dir() & !self.mask;
-                let val = ctx.gpio_high_value();
-                ctx.set_gpio_high(dev, val, dir).await
+                let dir = s.ctx().gpio_high_dir() & !self.mask;
+                let val = s.ctx().gpio_high_value();
+                s.set_gpio_high(val, dir).await
             }
         }
     }
 
     /// Write a value to this pin (must already be configured as output).
-    pub async fn write(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        high: bool,
-    ) -> Result<()> {
+    pub async fn write(&self, s: &mut MpsseSession<'_>, high: bool) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
-                let dir = ctx.gpio_low_dir();
+                let dir = s.ctx().gpio_low_dir();
                 if dir & self.mask == 0 {
                     return Err(Error::InvalidArgument("pin is not configured as output"));
                 }
-                let mut val = ctx.gpio_low_value();
+                let mut val = s.ctx().gpio_low_value();
                 if high {
                     val |= self.mask;
                 } else {
                     val &= !self.mask;
                 }
-                ctx.set_gpio_low(dev, val, dir).await
+                s.set_gpio_low(val, dir).await
             }
             GpioBank::High => {
-                let dir = ctx.gpio_high_dir();
+                let dir = s.ctx().gpio_high_dir();
                 if dir & self.mask == 0 {
                     return Err(Error::InvalidArgument("pin is not configured as output"));
                 }
-                let mut val = ctx.gpio_high_value();
+                let mut val = s.ctx().gpio_high_value();
                 if high {
                     val |= self.mask;
                 } else {
                     val &= !self.mask;
                 }
-                ctx.set_gpio_high(dev, val, dir).await
+                s.set_gpio_high(val, dir).await
             }
         }
     }
 
     /// Read the current state of this pin.
-    pub async fn read(&self, ctx: &MpsseContext, dev: &mut FtdiDevice) -> Result<bool> {
+    pub async fn read(&self, s: &mut MpsseSession<'_>) -> Result<bool> {
         let byte = match self.bank {
-            GpioBank::Low => ctx.get_gpio_low(dev).await?,
-            GpioBank::High => ctx.get_gpio_high(dev).await?,
+            GpioBank::Low => s.get_gpio_low().await?,
+            GpioBank::High => s.get_gpio_high().await?,
         };
         Ok(byte & self.mask != 0)
     }
@@ -245,40 +235,33 @@ impl GpioGroup {
     /// Configure all pins in this group as outputs with the given values.
     ///
     /// Only the bits corresponding to `self.mask` in `values` are used.
-    pub async fn set_all_output(
-        &self,
-        ctx: &mut MpsseContext,
-        dev: &mut FtdiDevice,
-        values: u8,
-    ) -> Result<()> {
+    pub async fn set_all_output(&self, s: &mut MpsseSession<'_>, values: u8) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
-                let dir = ctx.gpio_low_dir() | self.mask;
-                let mut val = ctx.gpio_low_value();
-                val = (val & !self.mask) | (values & self.mask);
-                ctx.set_gpio_low(dev, val, dir).await
+                let dir = s.ctx().gpio_low_dir() | self.mask;
+                let val = (s.ctx().gpio_low_value() & !self.mask) | (values & self.mask);
+                s.set_gpio_low(val, dir).await
             }
             GpioBank::High => {
-                let dir = ctx.gpio_high_dir() | self.mask;
-                let mut val = ctx.gpio_high_value();
-                val = (val & !self.mask) | (values & self.mask);
-                ctx.set_gpio_high(dev, val, dir).await
+                let dir = s.ctx().gpio_high_dir() | self.mask;
+                let val = (s.ctx().gpio_high_value() & !self.mask) | (values & self.mask);
+                s.set_gpio_high(val, dir).await
             }
         }
     }
 
     /// Configure all pins in this group as inputs.
-    pub async fn set_all_input(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+    pub async fn set_all_input(&self, s: &mut MpsseSession<'_>) -> Result<()> {
         match self.bank {
             GpioBank::Low => {
-                let dir = ctx.gpio_low_dir() & !self.mask;
-                let val = ctx.gpio_low_value();
-                ctx.set_gpio_low(dev, val, dir).await
+                let dir = s.ctx().gpio_low_dir() & !self.mask;
+                let val = s.ctx().gpio_low_value();
+                s.set_gpio_low(val, dir).await
             }
             GpioBank::High => {
-                let dir = ctx.gpio_high_dir() & !self.mask;
-                let val = ctx.gpio_high_value();
-                ctx.set_gpio_high(dev, val, dir).await
+                let dir = s.ctx().gpio_high_dir() & !self.mask;
+                let val = s.ctx().gpio_high_value();
+                s.set_gpio_high(val, dir).await
             }
         }
     }
@@ -286,10 +269,10 @@ impl GpioGroup {
     /// Read the current state of all pins in this group.
     ///
     /// Returns the raw byte with only the group's bits relevant.
-    pub async fn read(&self, ctx: &MpsseContext, dev: &mut FtdiDevice) -> Result<u8> {
+    pub async fn read(&self, s: &mut MpsseSession<'_>) -> Result<u8> {
         let byte = match self.bank {
-            GpioBank::Low => ctx.get_gpio_low(dev).await?,
-            GpioBank::High => ctx.get_gpio_high(dev).await?,
+            GpioBank::Low => s.get_gpio_low().await?,
+            GpioBank::High => s.get_gpio_high().await?,
         };
         Ok(byte & self.mask)
     }

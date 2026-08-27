@@ -135,6 +135,12 @@ pub(crate) enum RecoveryAction {
     EraseEeprom,
 }
 
+/// Allocate a process-unique device identity.
+fn next_device_id() -> u64 {
+    static NEXT_DEVICE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    NEXT_DEVICE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Marks a device as requiring recovery if a stateful future is dropped or
 /// returns before explicitly completing its cleanup.
 pub(crate) struct RecoveryGuard {
@@ -222,6 +228,9 @@ pub struct FtdiDevice {
     recovery_required: Arc<AtomicBool>,
     recovery_epoch: u64,
     recovery_action: RecoveryAction,
+    // Unique per opened device; binds MPSSE contexts to the device they were
+    // initialized on.
+    device_id: u64,
 }
 
 impl core::fmt::Debug for FtdiDevice {
@@ -285,6 +294,7 @@ impl FtdiDevice {
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
             recovery_action: RecoveryAction::None,
+            device_id: next_device_id(),
         })
     }
 
@@ -440,6 +450,7 @@ impl FtdiDevice {
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
             recovery_action: RecoveryAction::None,
+            device_id: next_device_id(),
         };
 
         // Reset device
@@ -562,6 +573,7 @@ impl FtdiDevice {
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
             recovery_action: RecoveryAction::None,
+            device_id: next_device_id(),
         };
 
         // Reset device.
@@ -639,6 +651,15 @@ impl FtdiDevice {
 
     pub(crate) fn recovery_epoch(&self) -> u64 {
         self.recovery_epoch
+    }
+
+    pub(crate) fn device_id(&self) -> u64 {
+        self.device_id
+    }
+
+    /// Invalidate every MPSSE context and bus object created before now.
+    pub(crate) fn bump_recovery_epoch(&mut self) {
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -725,6 +746,7 @@ impl FtdiDevice {
             .await?;
         self.readbuffer_offset = 0;
         self.readbuffer_remaining = 0;
+        self.bump_recovery_epoch();
         Ok(())
     }
 
@@ -1045,6 +1067,7 @@ impl FtdiDevice {
 
         self.bitbang_mode = mode;
         self.bitbang_enabled = mode != BitMode::Reset;
+        self.bump_recovery_epoch();
         Ok(())
     }
 
@@ -1461,7 +1484,7 @@ impl FtdiDevice {
         if restore_bitbang {
             self.set_bitmode(0xFF, bitbang_mode).await?;
         }
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        self.bump_recovery_epoch();
         self.recovery_required.store(false, Ordering::Release);
         recovery_guard.disarm();
         Ok(())

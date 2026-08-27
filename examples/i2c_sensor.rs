@@ -41,13 +41,15 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
     let mut mpsse = MpsseContext::init(&mut dev, 100_000).await?;
     println!("MPSSE clock: {} Hz (I2C standard mode)", mpsse.clock_hz());
 
+    let mut s = mpsse.session(&mut dev)?;
+
     // Configure I2C bus
-    let i2c = I2cBus::new(&mut mpsse, &mut dev).await?;
+    let i2c = I2cBus::new(&mut s).await?;
     println!("I2C bus initialized");
 
     // Read configuration register (2 bytes)
     let config = i2c
-        .write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_CONFIGURATION], 2)
+        .write_read(&mut s, TMP102_ADDR, &[REG_CONFIGURATION], 2)
         .await?;
     println!(
         "TMP102 config register: 0x{:02X}{:02X}",
@@ -56,7 +58,7 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
 
     // Read temperature register (2 bytes)
     let temp_raw = i2c
-        .write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_TEMPERATURE], 2)
+        .write_read(&mut s, TMP102_ADDR, &[REG_TEMPERATURE], 2)
         .await?;
     let raw_value = ((temp_raw[0] as i16) << 4) | ((temp_raw[1] as i16) >> 4);
 
@@ -71,7 +73,7 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
     println!("\nContinuous reading (5 samples, 1s interval):");
     for i in 0..5 {
         let data = i2c
-            .write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_TEMPERATURE], 2)
+            .write_read(&mut s, TMP102_ADDR, &[REG_TEMPERATURE], 2)
             .await?;
         let raw = ((data[0] as i16) << 4) | ((data[1] as i16) >> 4);
         let temp = raw as f32 * 0.0625;
