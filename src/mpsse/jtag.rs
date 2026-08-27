@@ -32,21 +32,20 @@
 //! ```no_run
 //! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, jtag::JtagBus}};
 //!
-//! let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
-//! let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?; // 1 MHz TCK
-//! let mut jtag = JtagBus::new(&mut mpsse, &mut dev)?;
+//! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+//! let mut mpsse = MpsseContext::init(dev, 1_000_000).await?; // 1 MHz TCK
+//! let mut jtag = JtagBus::new(&mut mpsse, dev).await?;
 //!
 //! // Reset TAP to known state
-//! jtag.reset(&mut dev)?;
+//! jtag.reset(dev).await?;
 //!
 //! // Read IDCODE (first DR after reset is IDCODE on most devices)
-//! jtag.goto_shift_dr(&mut dev)?;
-//! let idcode = jtag.shift_bits(&mpsse, &mut dev, &[0; 4], 32, true)?;
-//! jtag.goto_idle(&mut dev)?;
-//! # Ok::<(), ftdi_nusb::Error>(())
+//! jtag.goto_shift_dr(dev).await?;
+//! let idcode = jtag.shift_bits(&mpsse, dev, &[0; 4], 32, true).await?;
+//! jtag.goto_idle(dev).await?;
+//! # Ok(())
+//! # }
 //! ```
-
-use maybe_async::maybe_async;
 
 use crate::constants::mpsse;
 use crate::context::FtdiDevice;
@@ -97,7 +96,6 @@ impl JtagBus {
     ///
     /// TCK and TMS are driven low initially. The TAP state is set to Unknown;
     /// call [`reset`](Self::reset) to bring it to a known state.
-    #[maybe_async]
     pub async fn new(ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<Self> {
         let tms_pin = 0x08; // ADBUS3
 
@@ -123,7 +121,6 @@ impl JtagBus {
     ///
     /// This forces the TAP into Test-Logic-Reset regardless of its
     /// current state. Then clocks once with TMS=0 to enter Run-Test/Idle.
-    #[maybe_async]
     pub async fn reset(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         // WRITE_TMS: clock TMS bits out. The MPSSE command is:
         //   0x4B length_minus_1 data_byte
@@ -149,7 +146,6 @@ impl JtagBus {
     /// Navigate from Run-Test/Idle to Shift-DR.
     ///
     /// TMS sequence: 1, 0, 0 (Select-DR-Scan -> Capture-DR -> Shift-DR).
-    #[maybe_async]
     pub async fn goto_shift_dr(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         let mut cmd = Vec::with_capacity(4);
         // 3 bits: TMS = 1,0,0 -> LSB first = 0b001 = 0x01
@@ -166,7 +162,6 @@ impl JtagBus {
     ///
     /// TMS sequence: 1, 1, 0, 0 (Select-DR-Scan -> Select-IR-Scan ->
     /// Capture-IR -> Shift-IR).
-    #[maybe_async]
     pub async fn goto_shift_ir(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         let mut cmd = Vec::with_capacity(4);
         // 4 bits: TMS = 1,1,0,0 -> LSB first = 0b0011 = 0x03
@@ -182,7 +177,6 @@ impl JtagBus {
     /// Navigate from Exit1-DR/Exit1-IR to Run-Test/Idle.
     ///
     /// TMS sequence: 1, 0 (Update-DR/IR -> Run-Test/Idle).
-    #[maybe_async]
     pub async fn goto_idle(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         let mut cmd = Vec::with_capacity(4);
         // 2 bits: TMS = 1,0 -> LSB first = 0b01 = 0x01
@@ -199,7 +193,6 @@ impl JtagBus {
     ///
     /// Useful for devices that require a certain number of TCK cycles
     /// in Run-Test/Idle for internal processing.
-    #[maybe_async]
     pub async fn idle_clocks(&self, dev: &mut FtdiDevice, count: u32) -> Result<()> {
         if count == 0 {
             return Ok(());
@@ -244,7 +237,6 @@ impl JtagBus {
     ///
     /// Returns the captured TDO data as a byte vector. The first `bit_count`
     /// bits are valid (LSB first within each byte).
-    #[maybe_async]
     pub async fn shift_bits(
         &mut self,
         _ctx: &MpsseContext,
@@ -369,17 +361,20 @@ impl JtagBus {
     }
 
     /// Read exactly `len` bytes from the device, returning an error on short reads.
-    #[maybe_async]
     async fn read_exact(dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
         let mut offset = 0;
+        let mut empty_reads = 0;
         while offset < len {
             let n = dev.read_data(&mut buf[offset..]).await?;
             if n == 0 {
-                return Err(Error::InvalidArgument(
-                    "JTAG read returned fewer bytes than expected",
-                ));
+                empty_reads += 1;
+                if empty_reads >= 10 {
+                    return Err(Error::Timeout(dev.read_timeout()));
+                }
+                continue;
             }
+            empty_reads = 0;
             offset += n;
         }
         Ok(buf)
@@ -389,7 +384,6 @@ impl JtagBus {
     ///
     /// Convenience method: navigates to Shift-IR, shifts the instruction,
     /// exits, and returns to Idle.
-    #[maybe_async]
     pub async fn write_ir(
         &mut self,
         ctx: &MpsseContext,
@@ -407,7 +401,6 @@ impl JtagBus {
     ///
     /// Convenience method: navigates to Shift-DR, shifts the data,
     /// exits, and returns to Idle.
-    #[maybe_async]
     pub async fn shift_dr(
         &mut self,
         ctx: &MpsseContext,

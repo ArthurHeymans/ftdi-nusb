@@ -5,8 +5,6 @@ pub mod i2c;
 pub mod jtag;
 pub mod spi;
 
-use maybe_async::maybe_async;
-
 use crate::constants::mpsse;
 use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
@@ -25,7 +23,6 @@ pub struct MpsseContext {
 
 impl MpsseContext {
     /// Initialize MPSSE mode on the device and configure the clock frequency.
-    #[maybe_async]
     pub async fn init(dev: &mut FtdiDevice, clock_hz: u32) -> Result<Self> {
         let chip = dev.chip_type();
         let is_h_type = chip.is_h_type();
@@ -69,7 +66,6 @@ impl MpsseContext {
         self.clock_hz
     }
 
-    #[maybe_async]
     pub async fn set_clock(&mut self, dev: &mut FtdiDevice, clock_hz: u32) -> Result<()> {
         if clock_hz == 0 {
             return Err(Error::InvalidArgument("clock frequency must be > 0"));
@@ -118,7 +114,6 @@ impl MpsseContext {
         dev.write_all(&cmd).await
     }
 
-    #[maybe_async]
     pub async fn enable_3phase_clocking(&self, dev: &mut FtdiDevice) -> Result<()> {
         if !self.is_h_type {
             return Err(Error::InvalidArgument(
@@ -128,7 +123,6 @@ impl MpsseContext {
         dev.write_all(&[mpsse::EN_3_PHASE]).await
     }
 
-    #[maybe_async]
     pub async fn disable_3phase_clocking(&self, dev: &mut FtdiDevice) -> Result<()> {
         if !self.is_h_type {
             return Err(Error::InvalidArgument(
@@ -138,17 +132,14 @@ impl MpsseContext {
         dev.write_all(&[mpsse::DIS_3_PHASE]).await
     }
 
-    #[maybe_async]
     pub async fn enable_loopback(&self, dev: &mut FtdiDevice) -> Result<()> {
         dev.write_all(&[mpsse::LOOPBACK_START]).await
     }
 
-    #[maybe_async]
     pub async fn disable_loopback(&self, dev: &mut FtdiDevice) -> Result<()> {
         dev.write_all(&[mpsse::LOOPBACK_END]).await
     }
 
-    #[maybe_async]
     pub async fn set_gpio_low(
         &mut self,
         dev: &mut FtdiDevice,
@@ -161,7 +152,6 @@ impl MpsseContext {
             .await
     }
 
-    #[maybe_async]
     pub async fn get_gpio_low(&self, dev: &mut FtdiDevice) -> Result<u8> {
         dev.write_all(&[mpsse::GET_BITS_LOW, mpsse::SEND_IMMEDIATE])
             .await?;
@@ -173,7 +163,6 @@ impl MpsseContext {
         Ok(buf[0])
     }
 
-    #[maybe_async]
     pub async fn set_gpio_high(
         &mut self,
         dev: &mut FtdiDevice,
@@ -186,7 +175,6 @@ impl MpsseContext {
             .await
     }
 
-    #[maybe_async]
     pub async fn get_gpio_high(&self, dev: &mut FtdiDevice) -> Result<u8> {
         dev.write_all(&[mpsse::GET_BITS_HIGH, mpsse::SEND_IMMEDIATE])
             .await?;
@@ -234,7 +222,6 @@ impl MpsseContext {
         Ok(())
     }
 
-    #[maybe_async]
     pub async fn sync_mpsse(&self, dev: &mut FtdiDevice) -> Result<()> {
         const BOGUS_CMD: u8 = 0xAB;
 
@@ -261,7 +248,6 @@ impl MpsseContext {
         ))
     }
 
-    #[maybe_async]
     pub async fn command_response(
         &self,
         dev: &mut FtdiDevice,
@@ -286,7 +272,6 @@ impl MpsseContext {
         Ok(buf)
     }
 
-    #[maybe_async]
     pub async fn write_commands(&self, dev: &mut FtdiDevice, cmd: &[u8]) -> Result<()> {
         dev.write_all(cmd).await
     }

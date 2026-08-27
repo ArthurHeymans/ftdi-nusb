@@ -18,6 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo check --all-targets
+      - run: cargo check --all-targets --features smol
+      - run: cargo check --all-targets --features tokio
+      - run: cargo check --all-targets --all-features
       - run: cargo check --all-targets --features embedded-hal
 
   test:
@@ -28,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo test
-      - run: cargo test --features embedded-hal
+      - run: cargo test --all-features
 
   clippy:
     name: Clippy
@@ -40,7 +43,7 @@ jobs:
           components: clippy
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo clippy --all-targets --features embedded-hal -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   wasm:
     name: WASM (wasm32-unknown-unknown)
@@ -55,8 +58,9 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy
       - run: cargo check --target wasm32-unknown-unknown
+      - run: cargo check --target wasm32-unknown-unknown --all-features
       - run: cargo build --target wasm32-unknown-unknown
-      - run: cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown --all-features --lib -- -D warnings
 
   fmt:
     name: Format
