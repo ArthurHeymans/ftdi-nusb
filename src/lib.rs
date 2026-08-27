@@ -7,8 +7,11 @@
 //!
 //! # Quick Start
 //!
+//! [`FtdiDevice`] is asynchronous. Native applications that do not use an
+//! async runtime can open a [`blocking::FtdiDevice`] instead:
+//!
 //! ```no_run
-//! use ftdi_nusb::{FtdiDevice, constants::FTDI_VID, constants::pid};
+//! use ftdi_nusb::{blocking::FtdiDevice, constants::FTDI_VID, constants::pid};
 //!
 //! // Open the first FT232R connected
 //! let mut dev = FtdiDevice::open(FTDI_VID, pid::FT232)?;
@@ -96,7 +99,7 @@ pub mod stream;
 // ---- Convenience re-exports ----
 
 pub use constants::FTDI_VID;
-pub use context::{AsyncFtdiDevice, FtdiDevice};
+pub use context::FtdiDevice;
 pub use eeprom::FtdiEeprom;
 pub use error::{Error, Result};
 pub use types::*;

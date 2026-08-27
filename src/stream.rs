@@ -7,8 +7,7 @@
 use core::future::Future;
 use std::time::{Duration, Instant};
 
-use crate::blocking::FtdiDevice;
-use crate::context::AsyncFtdiDevice;
+use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 use crate::types::{BitMode, ChipType};
 
@@ -103,10 +102,10 @@ fn strip_modem_status(data: &[u8], actual_len: usize, packet_size: usize) -> Vec
 ///
 /// Call [`finish`](Self::finish) for deterministic cleanup. Dropping the
 /// session requests cancellation but cannot asynchronously drain transfers;
-/// call [`AsyncFtdiDevice::recover`] before using the device for another
+/// call [`FtdiDevice::recover`] before using the device for another
 /// protocol if a session future was cancelled or the session was dropped.
 pub struct FtdiStream<'a> {
-    device: &'a mut AsyncFtdiDevice,
+    device: &'a mut FtdiDevice,
     timeout: Duration,
     start: Instant,
     last_payload_time: Instant,
@@ -227,7 +226,7 @@ impl Drop for FtdiStream<'_> {
     }
 }
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Start a synchronous-FIFO streaming session.
     ///
     /// `packets_per_transfer` controls each USB buffer size and
@@ -344,25 +343,6 @@ impl AsyncFtdiDevice {
         }
 
         stream.finish().await
-    }
-}
-
-impl FtdiDevice {
-    /// Blocking compatibility wrapper around [`AsyncFtdiDevice::read_stream`].
-    pub fn read_stream<F>(
-        &mut self,
-        callback: F,
-        packets_per_transfer: usize,
-        num_transfers: usize,
-    ) -> Result<()>
-    where
-        F: FnMut(&[u8], Option<&StreamProgress>) -> bool,
-    {
-        futures_lite::future::block_on(self.as_async_mut().read_stream(
-            callback,
-            packets_per_transfer,
-            num_transfers,
-        ))
     }
 }
 

@@ -1,13 +1,13 @@
 //! EEPROM USB I/O operations: reading, writing, and erasing the physical EEPROM.
 
 use crate::constants::*;
-use crate::context::AsyncFtdiDevice;
+use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 use crate::types::ChipType;
 
 const MAGIC: u16 = 0x55AA;
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Read the entire EEPROM from the device.
     ///
     /// Performs 128 USB control transfers (2 bytes each) to read the full

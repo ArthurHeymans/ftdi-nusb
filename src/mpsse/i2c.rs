@@ -20,35 +20,31 @@
 //! ```no_run
 //! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, i2c::I2cBus}};
 //!
-//! let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
-//! let mut mpsse = MpsseContext::init(&mut dev, 100_000)?; // 100 kHz I2C
-//! let mut i2c = I2cBus::new(&mut mpsse, &mut dev)?;
+//! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+//! let mut mpsse = MpsseContext::init(dev, 100_000).await?; // 100 kHz I2C
+//! let mut i2c = I2cBus::new(&mut mpsse, dev).await?;
 //!
 //! // Write to device at address 0x50
-//! i2c.write(&mut mpsse, &mut dev, 0x50, &[0x00, 0x42])?;
+//! i2c.write(&mut mpsse, dev, 0x50, &[0x00, 0x42]).await?;
 //!
 //! // Read 2 bytes from device at address 0x50
-//! let data = i2c.read(&mut mpsse, &mut dev, 0x50, 2)?;
-//! # Ok::<(), ftdi_nusb::Error>(())
+//! let data = i2c.read(&mut mpsse, dev, 0x50, 2).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::constants::mpsse;
-use crate::context::{AsyncFtdiDevice, RecoveryGuard};
+use crate::context::{FtdiDevice, RecoveryGuard};
 use crate::error::{Error, Result};
 
-use super::{AsyncMpsseContext, read_exact};
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use super::blocking::I2cBus;
-#[cfg(target_arch = "wasm32")]
-pub type I2cBus = AsyncI2cBus;
+use super::{MpsseContext, read_exact};
 
 /// I2C bus instance using MPSSE.
 ///
 /// Manages the I2C bus state including the pin directions needed for
 /// open-drain SDA signaling.
 #[derive(Debug, Clone)]
-pub struct AsyncI2cBus {
+pub struct I2cBus {
     /// Direction mask when driving SDA (DO=output for low, DI=input).
     /// SCL is always output via SK (bit 0).
     /// SDA driven: DO (bit 1) = output, DI (bit 2) = input.
@@ -100,8 +96,8 @@ fn finish_transaction<T>(
     }
 }
 
-impl AsyncI2cBus {
-    fn ensure_current(&self, dev: &AsyncFtdiDevice) -> Result<()> {
+impl I2cBus {
+    fn ensure_current(&self, dev: &FtdiDevice) -> Result<()> {
         if self.recovery_epoch == dev.recovery_epoch() {
             Ok(())
         } else {
@@ -116,7 +112,7 @@ impl AsyncI2cBus {
     ///
     /// The MPSSE clock should already be set to the desired I2C bus speed
     /// (typically 100 kHz or 400 kHz).
-    pub async fn new(ctx: &mut AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<Self> {
+    pub async fn new(ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<Self> {
         if !ctx.is_h_type() {
             return Err(Error::InvalidArgument(
                 "I2C requires an H-type chip (FT2232H/FT4232H/FT232H)",
@@ -153,8 +149,8 @@ impl AsyncI2cBus {
     /// SDA goes low while SCL is high.
     pub async fn start(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
     ) -> Result<()> {
         self.ensure_current(dev)?;
         ctx.ensure_current(dev)?;
@@ -190,7 +186,7 @@ impl AsyncI2cBus {
     /// Generate an I2C STOP condition.
     ///
     /// SDA goes high while SCL is high.
-    pub async fn stop(&self, ctx: &mut AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn stop(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         ctx.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
@@ -226,7 +222,7 @@ impl AsyncI2cBus {
     /// Write a single byte and return whether ACK was received.
     ///
     /// Returns `true` if ACK (SDA=0) was received, `false` for NACK.
-    pub async fn write_byte(&self, dev: &mut AsyncFtdiDevice, byte: u8) -> Result<bool> {
+    pub async fn write_byte(&self, dev: &mut FtdiDevice, byte: u8) -> Result<bool> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(20);
@@ -271,7 +267,7 @@ impl AsyncI2cBus {
     ///
     /// Set `ack` to `true` to acknowledge (continue reading) or `false`
     /// to NACK (signal end of read).
-    pub async fn read_byte(&self, dev: &mut AsyncFtdiDevice, ack: bool) -> Result<u8> {
+    pub async fn read_byte(&self, dev: &mut FtdiDevice, ack: bool) -> Result<u8> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(20);
@@ -310,8 +306,8 @@ impl AsyncI2cBus {
     /// byte is NACKed.
     pub async fn write(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         address: u8,
         data: &[u8],
     ) -> Result<()> {
@@ -352,8 +348,8 @@ impl AsyncI2cBus {
     /// Sends START, address+R, reads `len` bytes (ACK all except last), STOP.
     pub async fn read(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         address: u8,
         len: usize,
     ) -> Result<Vec<u8>> {
@@ -398,8 +394,8 @@ impl AsyncI2cBus {
     /// Uses a repeated START between write and read phases.
     pub async fn write_read(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         address: u8,
         write_data: &[u8],
         read_len: usize,

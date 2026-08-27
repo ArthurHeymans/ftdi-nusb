@@ -5,7 +5,7 @@
 //!
 //! Usage: cargo run --example eeprom
 
-use ftdi_nusb::FtdiDevice;
+use ftdi_nusb::blocking::FtdiDevice;
 use ftdi_nusb::constants::{FTDI_VID, pid};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

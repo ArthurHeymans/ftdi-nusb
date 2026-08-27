@@ -1,6 +1,6 @@
 //! Core FTDI device handle and operations.
 //!
-//! [`AsyncFtdiDevice`] is the main type in this crate. It represents an opened,
+//! [`FtdiDevice`] is the main type in this crate. It represents an opened,
 //! configured FTDI USB device and provides methods for serial communication,
 //! bitbang/MPSSE mode, flow control, and EEPROM access.
 
@@ -164,9 +164,9 @@ impl Drop for RecoveryGuard {
 /// # Opening a device
 ///
 /// ```no_run
-/// use ftdi_nusb::AsyncFtdiDevice;
+/// use ftdi_nusb::FtdiDevice;
 ///
-/// # async fn example(dev: &mut AsyncFtdiDevice) -> ftdi_nusb::Result<()> {
+/// # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 /// dev.set_baudrate(115200).await?;
 /// dev.write_all(b"Hello FTDI!\r\n").await?;
 /// # Ok(())
@@ -175,7 +175,7 @@ impl Drop for RecoveryGuard {
 ///
 /// Native async constructors require the `smol` or `tokio` feature. The
 /// runtime-independent transfer methods are always available.
-pub struct AsyncFtdiDevice {
+pub struct FtdiDevice {
     #[allow(dead_code)] // Kept to ensure the USB device stays open
     device: nusb::Device,
     interface: nusb::Interface,
@@ -215,14 +215,9 @@ pub struct AsyncFtdiDevice {
     recovery_epoch: u64,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use crate::blocking::FtdiDevice;
-#[cfg(target_arch = "wasm32")]
-pub type FtdiDevice = AsyncFtdiDevice;
-
-impl core::fmt::Debug for AsyncFtdiDevice {
+impl core::fmt::Debug for FtdiDevice {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("AsyncFtdiDevice")
+        f.debug_struct("FtdiDevice")
             .field("chip_type", &self.chip_type)
             .field("baudrate", &self.baudrate)
             .field("interface", &self.interface_num)
@@ -233,7 +228,7 @@ impl core::fmt::Debug for AsyncFtdiDevice {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     pub(crate) fn from_open_device(
         device: nusb::Device,
         interface: nusb::Interface,
@@ -292,7 +287,7 @@ impl AsyncFtdiDevice {
 // ---- Native-only construction / Opening ----
 
 #[cfg(all(not(target_arch = "wasm32"), any(feature = "smol", feature = "tokio")))]
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Open the first FTDI device matching the given vendor and product IDs.
     ///
     /// Uses [`Interface::A`] by default. For multi-interface chips, use
@@ -449,7 +444,7 @@ impl AsyncFtdiDevice {
 // ---- WASM-only construction ----
 
 #[cfg(target_arch = "wasm32")]
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Show the browser's WebUSB device picker filtered by common FTDI VID/PIDs.
     ///
     /// Returns an open [`nusb::Device`] that can be passed to
@@ -578,7 +573,7 @@ impl AsyncFtdiDevice {
 
 // ---- Accessors (always available) ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// The detected FTDI chip type.
     pub fn chip_type(&self) -> ChipType {
         self.chip_type
@@ -597,7 +592,7 @@ impl AsyncFtdiDevice {
 
 // ---- Internal USB helpers ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read_endpoint_mut(
         &mut self,
@@ -691,7 +686,7 @@ impl AsyncFtdiDevice {
 
 // ---- Reset / Flush ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Perform a USB reset on the FTDI device.
     ///
     /// This resets the device to its default state. The internal read buffer
@@ -767,7 +762,7 @@ impl AsyncFtdiDevice {
 
 // ---- Serial Configuration ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Set the baud rate.
     ///
     /// The actual baud rate achieved is determined by the chip's clock
@@ -864,7 +859,7 @@ impl AsyncFtdiDevice {
 
 // ---- Flow Control / Modem Lines ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Set the flow control mode.
     pub async fn set_flow_control(&self, flow: FlowControl) -> Result<()> {
         match flow {
@@ -977,7 +972,7 @@ impl AsyncFtdiDevice {
 
 // ---- Latency Timer ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Set the latency timer value (1-255 ms).
     ///
     /// After setting the latency timer, this function sleeps for
@@ -1017,7 +1012,7 @@ impl AsyncFtdiDevice {
 
 // ---- Bitbang / MPSSE ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Enable a bitbang or MPSSE mode.
     pub async fn set_bitmode(&mut self, bitmask: u8, mode: BitMode) -> Result<()> {
         let val = (bitmask as u16) | ((mode.wire_value() as u16) << 8);
@@ -1048,7 +1043,7 @@ impl AsyncFtdiDevice {
 
 // ---- Chunk Size Configuration ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Set the read buffer chunk size.
     pub fn set_read_chunksize(&mut self, chunksize: usize) {
         self.readbuffer_offset = 0;
@@ -1075,7 +1070,7 @@ impl AsyncFtdiDevice {
 
 // ---- Data Transfer ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     async fn complete_pending_writes(&mut self, deadline: TransferDeadline) -> Result<()> {
         while self.write_endpoint.pending() > 0 {
             let completion = wait_for_completion(&mut self.write_endpoint, deadline)
@@ -1320,7 +1315,7 @@ fn determine_max_packet_size(
 
 // ---- Error Recovery ----
 
-impl AsyncFtdiDevice {
+impl FtdiDevice {
     /// Read data with retry on transient USB errors.
     pub async fn read_data_retry(
         &mut self,

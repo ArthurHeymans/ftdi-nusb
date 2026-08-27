@@ -34,8 +34,11 @@ verified line-by-line against the original C source.
 
 ## Quick Start
 
+`FtdiDevice` is asynchronous on every target. Native applications without an
+async runtime can use the blocking serial wrapper:
+
 ```rust,no_run
-use ftdi_nusb::{FtdiDevice, constants::FTDI_VID, constants::pid};
+use ftdi_nusb::{blocking::FtdiDevice, constants::FTDI_VID, constants::pid};
 
 // Open the first FT232R connected
 let mut dev = FtdiDevice::open(FTDI_VID, pid::FT232)?;
@@ -44,18 +47,22 @@ dev.write_all(b"Hello from Rust!\r\n")?;
 # Ok::<(), ftdi_nusb::Error>(())
 ```
 
+MPSSE and streaming are asynchronous APIs. A blocking application reaches them
+through `dev.as_async_mut()` and a `block_on` of its choice (see the examples).
+
 ### SPI
 
 ```rust,no_run
 use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, spi::{SpiDevice, SpiMode}}};
 
-let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
-let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
-let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0)?;
+# async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
+let spi = SpiDevice::new(&mut mpsse, dev, SpiMode::Mode0).await?;
 
 // Read JEDEC ID from SPI flash
-let id = spi.transfer(&mut mpsse, &mut dev, &[0x9F, 0, 0, 0])?;
-# Ok::<(), ftdi_nusb::Error>(())
+let id = spi.transfer(&mut mpsse, dev, &[0x9F, 0, 0, 0]).await?;
+# Ok(())
+# }
 ```
 
 ### I2C
@@ -63,13 +70,14 @@ let id = spi.transfer(&mut mpsse, &mut dev, &[0x9F, 0, 0, 0])?;
 ```rust,no_run
 use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, i2c::I2cBus}};
 
-let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
-let mut mpsse = MpsseContext::init(&mut dev, 100_000)?; // 100 kHz
-let i2c = I2cBus::new(&mut mpsse, &mut dev)?;
+# async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+let mut mpsse = MpsseContext::init(dev, 100_000).await?; // 100 kHz
+let i2c = I2cBus::new(&mut mpsse, dev).await?;
 
 // Write register address, read 2 bytes from I2C device at 0x48
-let data = i2c.write_read(&mut mpsse, &mut dev, 0x48, &[0x00], 2)?;
-# Ok::<(), ftdi_nusb::Error>(())
+let data = i2c.write_read(&mut mpsse, dev, 0x48, &[0x00], 2).await?;
+# Ok(())
+# }
 ```
 
 ### JTAG
@@ -77,20 +85,21 @@ let data = i2c.write_read(&mut mpsse, &mut dev, 0x48, &[0x00], 2)?;
 ```rust,no_run
 use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, jtag::JtagBus}};
 
-let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
-let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
-let mut jtag = JtagBus::new(&mut mpsse, &mut dev)?;
+# async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
+let mut jtag = JtagBus::new(&mut mpsse, dev).await?;
 
 // Reset TAP and read IDCODE
-jtag.reset(&mut dev)?;
-let idcode = jtag.shift_dr(&mpsse, &mut dev, &[0; 4], 32)?;
-# Ok::<(), ftdi_nusb::Error>(())
+jtag.reset(dev).await?;
+let idcode = jtag.shift_dr(&mpsse, dev, &[0; 4], 32).await?;
+# Ok(())
+# }
 ```
 
 ### EEPROM
 
 ```rust,no_run
-use ftdi_nusb::FtdiDevice;
+use ftdi_nusb::blocking::FtdiDevice;
 
 let mut dev = FtdiDevice::open(0x0403, 0x6001)?;
 
@@ -142,19 +151,19 @@ handles this automatically via nusb's `detach_and_claim_interface()`.
 
 ## Native async support
 
-The root [`FtdiDevice`] API remains blocking on native targets. Enable either
-runtime integration feature to use the asynchronous device API:
+Enable either runtime integration feature to use the asynchronous device
+constructors:
 
 ```toml
-ftdi-nusb = { version = "0.2", features = ["smol"] }
+ftdi-nusb = { version = "0.3", features = ["smol"] }
 # or: features = ["tokio"]
 ```
 
 ```rust,no_run
-use ftdi_nusb::AsyncFtdiDevice;
+use ftdi_nusb::FtdiDevice;
 
 # async fn example() -> ftdi_nusb::Result<()> {
-let mut dev = AsyncFtdiDevice::open(0x0403, 0x6001).await?;
+let mut dev = FtdiDevice::open(0x0403, 0x6001).await?;
 dev.set_baudrate(115_200).await?;
 dev.write_all(b"Hello from async Rust!\r\n").await?;
 # Ok(())
@@ -163,26 +172,26 @@ dev.write_all(b"Hello from async Rust!\r\n").await?;
 
 The features only select how nusb offloads blocking operating-system calls
 needed for discovery and opening. USB transfers themselves are
-runtime-independent. When both features are enabled, nusb uses its smol path.
-MPSSE provides matching `Async*` types for async applications while preserving
-its established blocking type names. The synchronous `embedded-hal` adapters
-remain on those blocking wrappers.
+runtime-independent, so `blocking::FtdiDevice` and the transfer methods work
+without either feature. When both features are enabled, nusb uses its smol
+path. The synchronous `embedded-hal` adapters drive the async implementation
+with an internal `block_on`.
 
 Async reads preserve an in-flight USB read when their future is cancelled, so
 the next read resumes without silently discarding serial input. Writes may have
 partially completed when cancelled. Stateful protocol or streaming sessions
 should be finished explicitly. If one is cancelled or dropped, subsequent I/O
 returns `Error::RecoveryRequired` until
-`AsyncFtdiDevice::recover().await` succeeds. Recovery invalidates existing MPSSE
+`FtdiDevice::recover().await` succeeds. Recovery invalidates existing MPSSE
 contexts and bus objects; initialize them again before issuing more MPSSE
 commands.
 
 ### Async streaming (native only)
 
 ```rust,no_run
-use ftdi_nusb::{AsyncFtdiDevice, StreamEvent};
+use ftdi_nusb::{FtdiDevice, StreamEvent};
 
-# async fn example(dev: &mut AsyncFtdiDevice) -> ftdi_nusb::Result<()> {
+# async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 let mut stream = dev.start_stream(8, 4).await?;
 while let Some(event) = stream.next().await? {
     match event {
@@ -241,9 +250,9 @@ dev.write_all(b"Hello from WebUSB!\r\n").await?;
 | `smol`         | Native async via nusb's smol integration    |
 | `tokio`        | Native async via nusb's Tokio integration   |
 
-Native targets expose both the blocking `FtdiDevice` API and the asynchronous
-`AsyncFtdiDevice` API. The `wasm32` target aliases `FtdiDevice` to the async
-implementation automatically.
+`FtdiDevice` is the asynchronous implementation on every target. Native
+targets additionally expose `blocking::FtdiDevice`, a thin wrapper that drives
+the serial, EEPROM, and configuration APIs to completion internally.
 
 ## License
 

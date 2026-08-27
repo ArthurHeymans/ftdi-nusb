@@ -32,30 +32,26 @@
 //! ```no_run
 //! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, jtag::JtagBus}};
 //!
-//! let mut dev = FtdiDevice::open(0x0403, 0x6014)?; // FT232H
-//! let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?; // 1 MHz TCK
-//! let mut jtag = JtagBus::new(&mut mpsse, &mut dev)?;
+//! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+//! let mut mpsse = MpsseContext::init(dev, 1_000_000).await?; // 1 MHz TCK
+//! let mut jtag = JtagBus::new(&mut mpsse, dev).await?;
 //!
 //! // Reset TAP to known state
-//! jtag.reset(&mut dev)?;
+//! jtag.reset(dev).await?;
 //!
 //! // Read IDCODE (first DR after reset is IDCODE on most devices)
-//! jtag.goto_shift_dr(&mut dev)?;
-//! let idcode = jtag.shift_bits(&mpsse, &mut dev, &[0; 4], 32, true)?;
-//! jtag.goto_idle(&mut dev)?;
-//! # Ok::<(), ftdi_nusb::Error>(())
+//! jtag.goto_shift_dr(dev).await?;
+//! let idcode = jtag.shift_bits(&mpsse, dev, &[0; 4], 32, true).await?;
+//! jtag.goto_idle(dev).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::constants::mpsse;
-use crate::context::AsyncFtdiDevice;
+use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 
-use super::{AsyncMpsseContext, read_exact};
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use super::blocking::JtagBus;
-#[cfg(target_arch = "wasm32")]
-pub type JtagBus = AsyncJtagBus;
+use super::{MpsseContext, read_exact};
 
 /// JTAG TAP state (simplified — not all states tracked).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,9 +74,9 @@ pub enum TapState {
 
 fn io_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
     (0..total)
-        .step_by(AsyncJtagBus::MAX_MPSSE_IO_CHUNK)
+        .step_by(JtagBus::MAX_MPSSE_IO_CHUNK)
         .map(move |offset| {
-            let len = (total - offset).min(AsyncJtagBus::MAX_MPSSE_IO_CHUNK);
+            let len = (total - offset).min(JtagBus::MAX_MPSSE_IO_CHUNK);
             (offset, len)
         })
 }
@@ -89,7 +85,7 @@ fn io_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
 ///
 /// Manages JTAG pin configuration and TAP state tracking.
 #[derive(Debug, Clone)]
-pub struct AsyncJtagBus {
+pub struct JtagBus {
     /// TMS pin bit mask in the low GPIO byte (default: ADBUS3 = 0x08).
     tms_pin: u8,
     /// Low-byte GPIO direction mask.
@@ -99,8 +95,8 @@ pub struct AsyncJtagBus {
     recovery_epoch: u64,
 }
 
-impl AsyncJtagBus {
-    fn ensure_current(&self, dev: &AsyncFtdiDevice) -> Result<()> {
+impl JtagBus {
+    fn ensure_current(&self, dev: &FtdiDevice) -> Result<()> {
         if self.recovery_epoch == dev.recovery_epoch() {
             Ok(())
         } else {
@@ -118,7 +114,7 @@ impl AsyncJtagBus {
     ///
     /// TCK and TMS are driven low initially. The TAP state is set to Unknown;
     /// call [`reset`](Self::reset) to bring it to a known state.
-    pub async fn new(ctx: &mut AsyncMpsseContext, dev: &mut AsyncFtdiDevice) -> Result<Self> {
+    pub async fn new(ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<Self> {
         let tms_pin = 0x08; // ADBUS3
 
         // Direction: TCK(0)=out, TDI(1)=out, TDO(2)=in, TMS(3)=out
@@ -144,7 +140,7 @@ impl AsyncJtagBus {
     ///
     /// This forces the TAP into Test-Logic-Reset regardless of its
     /// current state. Then clocks once with TMS=0 to enter Run-Test/Idle.
-    pub async fn reset(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn reset(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         // WRITE_TMS: clock TMS bits out. The MPSSE command is:
@@ -172,7 +168,7 @@ impl AsyncJtagBus {
     /// Navigate from Run-Test/Idle to Shift-DR.
     ///
     /// TMS sequence: 1, 0, 0 (Select-DR-Scan -> Capture-DR -> Shift-DR).
-    pub async fn goto_shift_dr(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn goto_shift_dr(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
@@ -191,7 +187,7 @@ impl AsyncJtagBus {
     ///
     /// TMS sequence: 1, 1, 0, 0 (Select-DR-Scan -> Select-IR-Scan ->
     /// Capture-IR -> Shift-IR).
-    pub async fn goto_shift_ir(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn goto_shift_ir(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
@@ -209,7 +205,7 @@ impl AsyncJtagBus {
     /// Navigate from Exit1-DR/Exit1-IR to Run-Test/Idle.
     ///
     /// TMS sequence: 1, 0 (Update-DR/IR -> Run-Test/Idle).
-    pub async fn goto_idle(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn goto_idle(&mut self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
@@ -228,7 +224,7 @@ impl AsyncJtagBus {
     ///
     /// Useful for devices that require a certain number of TCK cycles
     /// in Run-Test/Idle for internal processing.
-    pub async fn idle_clocks(&self, dev: &mut AsyncFtdiDevice, count: u32) -> Result<()> {
+    pub async fn idle_clocks(&self, dev: &mut FtdiDevice, count: u32) -> Result<()> {
         self.ensure_current(dev)?;
         if count == 0 {
             return Ok(());
@@ -278,8 +274,8 @@ impl AsyncJtagBus {
     /// bits are valid (LSB first within each byte).
     pub async fn shift_bits(
         &mut self,
-        ctx: &AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &MpsseContext,
+        dev: &mut FtdiDevice,
         tdi_data: &[u8],
         bit_count: usize,
         exit_shift: bool,
@@ -378,8 +374,8 @@ impl AsyncJtagBus {
     /// exits, and returns to Idle.
     pub async fn write_ir(
         &mut self,
-        ctx: &AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &MpsseContext,
+        dev: &mut FtdiDevice,
         ir_data: &[u8],
         ir_len: usize,
     ) -> Result<Vec<u8>> {
@@ -395,8 +391,8 @@ impl AsyncJtagBus {
     /// exits, and returns to Idle.
     pub async fn shift_dr(
         &mut self,
-        ctx: &AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &MpsseContext,
+        dev: &mut FtdiDevice,
         dr_data: &[u8],
         dr_len: usize,
     ) -> Result<Vec<u8>> {
@@ -432,7 +428,7 @@ mod tests {
 
     #[test]
     fn tap_state_initial_is_unknown() {
-        let bus = AsyncJtagBus {
+        let bus = JtagBus {
             tms_pin: 0x08,
             dir_mask: 0x0B,
             state: TapState::Unknown,
@@ -486,7 +482,7 @@ mod tests {
 
     #[test]
     fn jtag_pin_mapping() {
-        let bus = AsyncJtagBus {
+        let bus = JtagBus {
             tms_pin: 0x08,
             dir_mask: 0x0B,
             state: TapState::Unknown,

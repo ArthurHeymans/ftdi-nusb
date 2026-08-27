@@ -17,7 +17,6 @@
 //! cargo run --example i2c_sensor
 //! ```
 
-use ftdi_nusb::FtdiDevice;
 use ftdi_nusb::mpsse::MpsseContext;
 use ftdi_nusb::mpsse::i2c::I2cBus;
 
@@ -30,28 +29,35 @@ const REG_CONFIGURATION: u8 = 0x01;
 
 fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
+    futures_lite::future::block_on(run())
+}
 
+async fn run() -> Result<(), ftdi_nusb::Error> {
     println!("Opening FT232H...");
-    let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
+    let mut dev = ftdi_nusb::blocking::FtdiDevice::open(0x0403, 0x6014)?.into_async();
     println!("Chip: {:?}", dev.chip_type());
 
     // Initialize MPSSE at 100 kHz I2C clock
-    let mut mpsse = MpsseContext::init(&mut dev, 100_000)?;
+    let mut mpsse = MpsseContext::init(&mut dev, 100_000).await?;
     println!("MPSSE clock: {} Hz (I2C standard mode)", mpsse.clock_hz());
 
     // Configure I2C bus
-    let i2c = I2cBus::new(&mut mpsse, &mut dev)?;
+    let i2c = I2cBus::new(&mut mpsse, &mut dev).await?;
     println!("I2C bus initialized");
 
     // Read configuration register (2 bytes)
-    let config = i2c.write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_CONFIGURATION], 2)?;
+    let config = i2c
+        .write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_CONFIGURATION], 2)
+        .await?;
     println!(
         "TMP102 config register: 0x{:02X}{:02X}",
         config[0], config[1]
     );
 
     // Read temperature register (2 bytes)
-    let temp_raw = i2c.write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_TEMPERATURE], 2)?;
+    let temp_raw = i2c
+        .write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_TEMPERATURE], 2)
+        .await?;
     let raw_value = ((temp_raw[0] as i16) << 4) | ((temp_raw[1] as i16) >> 4);
 
     // TMP102: 12-bit resolution, 0.0625 degrees C per LSB
@@ -64,7 +70,9 @@ fn main() -> Result<(), ftdi_nusb::Error> {
     // Continuous reading loop (5 samples)
     println!("\nContinuous reading (5 samples, 1s interval):");
     for i in 0..5 {
-        let data = i2c.write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_TEMPERATURE], 2)?;
+        let data = i2c
+            .write_read(&mut mpsse, &mut dev, TMP102_ADDR, &[REG_TEMPERATURE], 2)
+            .await?;
         let raw = ((data[0] as i16) << 4) | ((data[1] as i16) >> 4);
         let temp = raw as f32 * 0.0625;
         println!("  Sample {}: {:.2} C", i + 1, temp);

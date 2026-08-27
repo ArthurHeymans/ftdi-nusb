@@ -18,31 +18,27 @@
 //! ```no_run
 //! use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, spi::{SpiDevice, SpiMode}}};
 //!
-//! let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
-//! let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
-//! let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0)?;
+//! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
+//! let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
+//! let spi = SpiDevice::new(&mut mpsse, dev, SpiMode::Mode0).await?;
 //!
 //! // Write 3 bytes, read 3 bytes (full duplex)
-//! let response = spi.transfer(&mut mpsse, &mut dev, &[0x9F, 0x00, 0x00])?;
+//! let response = spi.transfer(&mut mpsse, dev, &[0x9F, 0x00, 0x00]).await?;
 //!
 //! // Write-only (CS automatically asserted/deasserted)
-//! spi.write(&mut mpsse, &mut dev, &[0x06])?;
+//! spi.write(&mut mpsse, dev, &[0x06]).await?;
 //!
 //! // Read-only
-//! let data = spi.read(&mut mpsse, &mut dev, 4)?;
-//! # Ok::<(), ftdi_nusb::Error>(())
+//! let data = spi.read(&mut mpsse, dev, 4).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::constants::mpsse;
-use crate::context::AsyncFtdiDevice;
+use crate::context::FtdiDevice;
 use crate::error::Result;
 
-use super::{AsyncMpsseContext, read_exact};
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use super::blocking::SpiDevice;
-#[cfg(target_arch = "wasm32")]
-pub type SpiDevice = AsyncSpiDevice;
+use super::{MpsseContext, read_exact};
 
 /// Maximum bytes per single MPSSE transfer command (2-byte length field, encoding len-1).
 const MAX_MPSSE_TRANSFER: usize = 65536;
@@ -113,7 +109,7 @@ impl SpiMode {
 
 /// Configuration for an SPI device connected to the MPSSE.
 #[derive(Debug, Clone)]
-pub struct AsyncSpiDevice {
+pub struct SpiDevice {
     /// The SPI mode (clock polarity and phase).
     mode: SpiMode,
     /// Whether to use LSB-first bit order (default: MSB first).
@@ -134,7 +130,7 @@ pub struct AsyncSpiDevice {
     idle_value: u8,
 }
 
-impl AsyncSpiDevice {
+impl SpiDevice {
     /// Create a new SPI device configuration with default CS on ADBUS3.
     ///
     /// Initializes the MPSSE pins for SPI:
@@ -143,8 +139,8 @@ impl AsyncSpiDevice {
     /// - ADBUS2 (DI) = MISO input
     /// - ADBUS3 = CS# output (active low, deasserted on init)
     pub async fn new(
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         mode: SpiMode,
     ) -> Result<Self> {
         Self::with_cs_pin(ctx, dev, mode, 0x08, true, false).await
@@ -159,8 +155,8 @@ impl AsyncSpiDevice {
     ///
     /// `lsb_first` controls the bit order (true = LSB first, false = MSB first).
     pub async fn with_cs_pin(
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         mode: SpiMode,
         cs_pin: u8,
         cs_active_low: bool,
@@ -225,8 +221,8 @@ impl AsyncSpiDevice {
     /// Assert the chip-select line (make it active).
     pub async fn cs_assert(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
     ) -> Result<()> {
         if self.cs_pin == 0 {
             return Ok(());
@@ -242,8 +238,8 @@ impl AsyncSpiDevice {
     /// Deassert the chip-select line (make it inactive).
     pub async fn cs_deassert(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
     ) -> Result<()> {
         if self.cs_pin == 0 {
             return Ok(());
@@ -253,7 +249,7 @@ impl AsyncSpiDevice {
 
     pub(crate) async fn transfer_into_raw(
         &self,
-        dev: &mut AsyncFtdiDevice,
+        dev: &mut FtdiDevice,
         read: &mut [u8],
         write: &[u8],
     ) -> Result<()> {
@@ -271,7 +267,7 @@ impl AsyncSpiDevice {
         Ok(())
     }
 
-    pub(crate) async fn write_raw(&self, dev: &mut AsyncFtdiDevice, tx: &[u8]) -> Result<()> {
+    pub(crate) async fn write_raw(&self, dev: &mut FtdiDevice, tx: &[u8]) -> Result<()> {
         for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
             let (lo, hi) = encode_len(chunk.len());
             let mut cmd = Vec::with_capacity(chunk.len() + 3);
@@ -282,7 +278,7 @@ impl AsyncSpiDevice {
         Ok(())
     }
 
-    pub(crate) async fn read_raw(&self, dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
+    pub(crate) async fn read_raw(&self, dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
         let mut received = Vec::with_capacity(len);
         let mut remaining = len;
         while remaining > 0 {
@@ -300,8 +296,8 @@ impl AsyncSpiDevice {
     /// number of bytes.
     pub async fn transfer(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         tx: &[u8],
     ) -> Result<Vec<u8>> {
         if tx.is_empty() {
@@ -322,8 +318,8 @@ impl AsyncSpiDevice {
     /// Write-only SPI transfer with automatic chip-select handling.
     pub async fn write(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         tx: &[u8],
     ) -> Result<()> {
         if tx.is_empty() {
@@ -343,8 +339,8 @@ impl AsyncSpiDevice {
     /// Read-only SPI transfer with automatic chip-select handling.
     pub async fn read(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         len: usize,
     ) -> Result<Vec<u8>> {
         if len == 0 {
@@ -364,8 +360,8 @@ impl AsyncSpiDevice {
     /// Perform a write-then-read SPI transaction with a single CS assertion.
     pub async fn write_read(
         &self,
-        ctx: &mut AsyncMpsseContext,
-        dev: &mut AsyncFtdiDevice,
+        ctx: &mut MpsseContext,
+        dev: &mut FtdiDevice,
         tx: &[u8],
         read_len: usize,
     ) -> Result<Vec<u8>> {
@@ -595,7 +591,7 @@ mod tests {
     #[test]
     fn cs_assert_active_low() {
         // Active low CS on ADBUS3 (0x08): idle has CS=high, asserted = CS low
-        let spi = AsyncSpiDevice {
+        let spi = SpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x08,
@@ -619,7 +615,7 @@ mod tests {
 
     #[test]
     fn cs_assert_active_high() {
-        let spi = AsyncSpiDevice {
+        let spi = SpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x08,
@@ -638,7 +634,7 @@ mod tests {
 
     #[test]
     fn cs_deassert_returns_to_idle() {
-        let spi = AsyncSpiDevice {
+        let spi = SpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x08,
@@ -657,7 +653,7 @@ mod tests {
 
     #[test]
     fn cs_pin_zero_is_noop() {
-        let spi = AsyncSpiDevice {
+        let spi = SpiDevice {
             mode: SpiMode::Mode0,
             lsb_first: false,
             cs_pin: 0x00, // Manual CS

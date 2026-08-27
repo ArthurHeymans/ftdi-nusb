@@ -5,15 +5,8 @@ pub mod i2c;
 pub mod jtag;
 pub mod spi;
 
-#[cfg(not(target_arch = "wasm32"))]
-mod blocking;
-#[cfg(not(target_arch = "wasm32"))]
-pub use blocking::MpsseContext;
-#[cfg(target_arch = "wasm32")]
-pub type MpsseContext = AsyncMpsseContext;
-
 use crate::constants::mpsse;
-use crate::context::AsyncFtdiDevice;
+use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 use crate::types::{BitMode, ChipType};
 
@@ -48,7 +41,7 @@ impl ReadDeadline {
     }
 }
 
-pub(super) async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
+pub(super) async fn read_exact(dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
     let deadline = ReadDeadline::new(dev.read_timeout());
     let mut buf = vec![0; len];
     let mut offset = 0;
@@ -67,7 +60,7 @@ pub(super) async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<
 
 /// MPSSE context holding pin state and clock configuration.
 #[derive(Debug, Clone)]
-pub struct AsyncMpsseContext {
+pub struct MpsseContext {
     clock_hz: u32,
     is_h_type: bool,
     gpio_low_value: u8,
@@ -77,9 +70,9 @@ pub struct AsyncMpsseContext {
     recovery_epoch: u64,
 }
 
-impl AsyncMpsseContext {
+impl MpsseContext {
     /// Initialize MPSSE mode on the device and configure the clock frequency.
-    pub async fn init(dev: &mut AsyncFtdiDevice, clock_hz: u32) -> Result<Self> {
+    pub async fn init(dev: &mut FtdiDevice, clock_hz: u32) -> Result<Self> {
         dev.ensure_ready()?;
         let chip = dev.chip_type();
         let is_h_type = chip.is_h_type();
@@ -126,7 +119,7 @@ impl AsyncMpsseContext {
         self.clock_hz
     }
 
-    pub(crate) fn ensure_current(&self, dev: &AsyncFtdiDevice) -> Result<()> {
+    pub(crate) fn ensure_current(&self, dev: &FtdiDevice) -> Result<()> {
         if self.recovery_epoch == dev.recovery_epoch() {
             Ok(())
         } else {
@@ -134,7 +127,7 @@ impl AsyncMpsseContext {
         }
     }
 
-    pub async fn set_clock(&mut self, dev: &mut AsyncFtdiDevice, clock_hz: u32) -> Result<()> {
+    pub async fn set_clock(&mut self, dev: &mut FtdiDevice, clock_hz: u32) -> Result<()> {
         self.ensure_current(dev)?;
         if clock_hz == 0 {
             return Err(Error::InvalidArgument("clock frequency must be > 0"));
@@ -182,7 +175,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn enable_3phase_clocking(&self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn enable_3phase_clocking(&self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         if !self.is_h_type {
             return Err(Error::InvalidArgument(
@@ -195,7 +188,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn disable_3phase_clocking(&self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn disable_3phase_clocking(&self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         if !self.is_h_type {
             return Err(Error::InvalidArgument(
@@ -208,7 +201,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn enable_loopback(&self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn enable_loopback(&self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         dev.write_all(&[mpsse::LOOPBACK_START]).await?;
@@ -216,7 +209,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn disable_loopback(&self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn disable_loopback(&self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         dev.write_all(&[mpsse::LOOPBACK_END]).await?;
@@ -226,7 +219,7 @@ impl AsyncMpsseContext {
 
     pub async fn set_gpio_low(
         &mut self,
-        dev: &mut AsyncFtdiDevice,
+        dev: &mut FtdiDevice,
         value: u8,
         direction: u8,
     ) -> Result<()> {
@@ -240,7 +233,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn get_gpio_low(&self, dev: &mut AsyncFtdiDevice) -> Result<u8> {
+    pub async fn get_gpio_low(&self, dev: &mut FtdiDevice) -> Result<u8> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         dev.write_all(&[mpsse::GET_BITS_LOW, mpsse::SEND_IMMEDIATE])
@@ -252,7 +245,7 @@ impl AsyncMpsseContext {
 
     pub async fn set_gpio_high(
         &mut self,
-        dev: &mut AsyncFtdiDevice,
+        dev: &mut FtdiDevice,
         value: u8,
         direction: u8,
     ) -> Result<()> {
@@ -266,7 +259,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn get_gpio_high(&self, dev: &mut AsyncFtdiDevice) -> Result<u8> {
+    pub async fn get_gpio_high(&self, dev: &mut FtdiDevice) -> Result<u8> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         dev.write_all(&[mpsse::GET_BITS_HIGH, mpsse::SEND_IMMEDIATE])
@@ -312,7 +305,7 @@ impl AsyncMpsseContext {
         Ok(())
     }
 
-    pub async fn sync_mpsse(&self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+    pub async fn sync_mpsse(&self, dev: &mut FtdiDevice) -> Result<()> {
         self.ensure_current(dev)?;
         const BOGUS_CMD: u8 = 0xAB;
         let guard = dev.begin_stateful_operation()?;
@@ -339,7 +332,7 @@ impl AsyncMpsseContext {
 
     pub async fn command_response(
         &self,
-        dev: &mut AsyncFtdiDevice,
+        dev: &mut FtdiDevice,
         cmd: &[u8],
         read_len: usize,
     ) -> Result<Vec<u8>> {
@@ -355,7 +348,7 @@ impl AsyncMpsseContext {
         Ok(response)
     }
 
-    pub async fn write_commands(&self, dev: &mut AsyncFtdiDevice, cmd: &[u8]) -> Result<()> {
+    pub async fn write_commands(&self, dev: &mut FtdiDevice, cmd: &[u8]) -> Result<()> {
         self.ensure_current(dev)?;
         let guard = dev.begin_stateful_operation()?;
         dev.write_all(cmd).await?;
@@ -425,7 +418,7 @@ mod tests {
 
     #[test]
     fn mpsse_context_default_state() {
-        let ctx = AsyncMpsseContext::test_new(true);
+        let ctx = MpsseContext::test_new(true);
         assert_eq!(ctx.gpio_low_value(), 0);
         assert_eq!(ctx.gpio_low_dir(), 0);
         assert_eq!(ctx.gpio_high_value(), 0);
@@ -436,7 +429,7 @@ mod tests {
 
     #[test]
     fn update_gpio_low_state_tracks_values() {
-        let mut ctx = AsyncMpsseContext::test_new(true);
+        let mut ctx = MpsseContext::test_new(true);
         ctx.update_gpio_low_state(0xAB, 0xCD);
         assert_eq!(ctx.gpio_low_value(), 0xAB);
         assert_eq!(ctx.gpio_low_dir(), 0xCD);
@@ -480,18 +473,18 @@ mod tests {
 
     #[test]
     fn check_bad_command_empty() {
-        assert!(AsyncMpsseContext::check_bad_command(&[]).is_ok());
+        assert!(MpsseContext::check_bad_command(&[]).is_ok());
     }
 
     #[test]
     fn check_bad_command_normal_data() {
-        assert!(AsyncMpsseContext::check_bad_command(&[0x00, 0x01, 0xFF]).is_ok());
+        assert!(MpsseContext::check_bad_command(&[0x00, 0x01, 0xFF]).is_ok());
     }
 
     #[test]
     fn check_bad_command_detected() {
         let response = [0xFA, 0xAB];
-        let err = AsyncMpsseContext::check_bad_command(&response).unwrap_err();
+        let err = MpsseContext::check_bad_command(&response).unwrap_err();
         match err {
             crate::error::Error::MpsseBadCommand(opcode) => assert_eq!(opcode, 0xAB),
             _ => panic!("expected MpsseBadCommand error, got {:?}", err),
@@ -501,7 +494,7 @@ mod tests {
     #[test]
     fn check_bad_command_in_middle_of_data() {
         let response = [0x01, 0x02, 0xFA, 0x99, 0x03];
-        let err = AsyncMpsseContext::check_bad_command(&response).unwrap_err();
+        let err = MpsseContext::check_bad_command(&response).unwrap_err();
         match err {
             crate::error::Error::MpsseBadCommand(opcode) => assert_eq!(opcode, 0x99),
             _ => panic!("expected MpsseBadCommand error"),
@@ -511,11 +504,11 @@ mod tests {
     #[test]
     fn check_bad_command_fa_at_end_no_match() {
         let response = [0x01, 0x02, 0xFA];
-        assert!(AsyncMpsseContext::check_bad_command(&response).is_ok());
+        assert!(MpsseContext::check_bad_command(&response).is_ok());
     }
 
     #[test]
     fn bad_command_constant() {
-        assert_eq!(AsyncMpsseContext::BAD_COMMAND, 0xFA);
+        assert_eq!(MpsseContext::BAD_COMMAND, 0xFA);
     }
 }

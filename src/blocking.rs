@@ -4,15 +4,15 @@ use core::time::Duration;
 
 use nusb::MaybeFuture;
 
-use crate::context::AsyncFtdiDevice;
+use crate::context::FtdiDevice as AsyncDevice;
 use crate::error::{Error, Result};
 use crate::types::*;
 
 /// A blocking FTDI device handle for native applications.
 ///
-/// Use [`AsyncFtdiDevice`] directly from asynchronous applications.
+/// Use the asynchronous [`crate::FtdiDevice`] directly from async applications.
 #[derive(Debug)]
-pub struct FtdiDevice(AsyncFtdiDevice);
+pub struct FtdiDevice(AsyncDevice);
 
 impl FtdiDevice {
     pub fn open(vendor: u16, product: u16) -> Result<Self> {
@@ -49,21 +49,25 @@ impl FtdiDevice {
         let interface = device
             .detach_and_claim_interface(config.interface_num)
             .wait()?;
-        let mut inner = AsyncFtdiDevice::from_open_device(device, interface, iface)?;
+        let mut inner = AsyncDevice::from_open_device(device, interface, iface)?;
         futures_lite::future::block_on(inner.initialize())?;
         Ok(Self(inner))
     }
 
-    pub fn into_async(self) -> AsyncFtdiDevice {
+    pub fn into_async(self) -> AsyncDevice {
         self.0
     }
 
-    pub(crate) fn as_async_mut(&mut self) -> &mut AsyncFtdiDevice {
+    /// Mutably borrow the wrapped asynchronous device.
+    ///
+    /// Asynchronous-only features (MPSSE, streaming) are reached through this
+    /// borrow, driven by a `block_on` of the caller's choice.
+    pub fn as_async_mut(&mut self) -> &mut AsyncDevice {
         &mut self.0
     }
 }
 
-impl AsyncFtdiDevice {
+impl AsyncDevice {
     /// Wrap this async device in the native blocking API.
     pub fn into_blocking(self) -> FtdiDevice {
         FtdiDevice(self)
