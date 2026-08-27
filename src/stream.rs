@@ -7,7 +7,10 @@
 use core::future::Future;
 use std::time::{Duration, Instant};
 
-use crate::context::FtdiDevice;
+use crate::context::{
+    FtdiDevice, TransferDeadline, cancel_and_drain, next_before_deadline,
+    strip_modem_status_to_vec,
+};
 use crate::error::{Error, Result};
 use crate::types::{BitMode, ChipType};
 
@@ -31,71 +34,6 @@ pub enum StreamEvent {
     Data(Vec<u8>),
     /// Periodic transfer statistics.
     Progress(StreamProgress),
-}
-
-type ReadEndpoint = nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>;
-
-async fn next_with_timeout(
-    endpoint: &mut ReadEndpoint,
-    timeout: Duration,
-) -> Option<nusb::transfer::Completion> {
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
-        return Some(endpoint.next_complete().await);
-    };
-    let remaining = deadline.checked_duration_since(Instant::now())?;
-
-    futures_lite::future::race(async { Some(endpoint.next_complete().await) }, async {
-        futures_timer::Delay::new(remaining).await;
-        None
-    })
-    .await
-}
-
-async fn cancel_and_drain(endpoint: &mut ReadEndpoint, timeout: Duration) -> Result<()> {
-    endpoint.cancel_all();
-    let deadline = Instant::now().checked_add(timeout);
-
-    while endpoint.pending() > 0 {
-        let completion = match deadline {
-            Some(deadline) => {
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    return Err(Error::Timeout(timeout));
-                };
-                futures_lite::future::race(
-                    async {
-                        endpoint.next_complete().await;
-                        true
-                    },
-                    async {
-                        futures_timer::Delay::new(remaining).await;
-                        false
-                    },
-                )
-                .await
-            }
-            None => {
-                endpoint.next_complete().await;
-                true
-            }
-        };
-
-        if !completion {
-            return Err(Error::Timeout(timeout));
-        }
-    }
-
-    Ok(())
-}
-
-fn strip_modem_status(data: &[u8], actual_len: usize, packet_size: usize) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(actual_len.saturating_sub(2));
-    for packet_start in (0..actual_len).step_by(packet_size) {
-        let packet_end = (packet_start + packet_size).min(actual_len);
-        if packet_end - packet_start > 2 {
-            payload.extend_from_slice(&data[packet_start + 2..packet_end]);
-        }
-    }
-    payload
 }
 
 /// An active asynchronous synchronous-FIFO read session.
@@ -136,9 +74,12 @@ impl FtdiStream<'_> {
                 .checked_sub(Instant::now().duration_since(self.last_payload_time))
                 .ok_or(Error::Timeout(self.timeout));
             let completion = match remaining {
-                Ok(remaining) => next_with_timeout(self.device.read_endpoint_mut(), remaining)
-                    .await
-                    .ok_or(Error::Timeout(self.timeout)),
+                Ok(remaining) => next_before_deadline(
+                    self.device.read_endpoint_mut(),
+                    TransferDeadline::new(remaining),
+                )
+                .await
+                .ok_or(Error::Timeout(self.timeout)),
                 Err(error) => Err(error),
             };
 
@@ -163,7 +104,7 @@ impl FtdiStream<'_> {
 
             let actual_len = completion.actual_len;
             let packet_size = self.device.read_endpoint_mut().max_packet_size();
-            let payload = strip_modem_status(&completion.buffer, actual_len, packet_size);
+            let payload = strip_modem_status_to_vec(&completion.buffer[..actual_len], packet_size);
 
             // Reuse the transfer allocation rather than allocating a new USB
             // buffer for every completion.
@@ -357,13 +298,13 @@ mod tests {
             0xcc, 0xdd, 7, 8, 9, 10, 11, 12, // packet two
         ];
         assert_eq!(
-            strip_modem_status(&raw, raw.len(), 8),
+            strip_modem_status_to_vec(&raw, 8),
             (1..=12).collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn ignores_status_only_packets() {
-        assert!(strip_modem_status(&[0xaa, 0xbb], 2, 64).is_empty());
+        assert!(strip_modem_status_to_vec(&[0xaa, 0xbb], 64).is_empty());
     }
 }
