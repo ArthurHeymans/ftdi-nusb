@@ -15,7 +15,10 @@ impl AsyncFtdiDevice {
     ///
     /// After reading, the EEPROM size is auto-detected by comparing halves
     /// of the buffer.
+    /// If this future is cancelled mid-read, the partially filled buffer is
+    /// inconsistent; the device is poisoned until [`recover`](Self::recover).
     pub async fn read_eeprom(&mut self) -> Result<()> {
+        let guard = self.begin_stateful_operation()?;
         for i in 0..(FTDI_MAX_EEPROM_SIZE / 2) {
             let data = self
                 .control_in(SIO_READ_EEPROM_REQUEST, 0, i as u16, 2)
@@ -47,6 +50,7 @@ impl AsyncFtdiDevice {
             }
         }
 
+        guard.disarm();
         Ok(())
     }
 
@@ -55,6 +59,8 @@ impl AsyncFtdiDevice {
     /// The EEPROM must have been initialized (via `eeprom_build` or manual
     /// setup). Performs the same initialization sequence observed from FTDI's
     /// MProg tool.
+    /// If this future is cancelled mid-write, the EEPROM holds a partial
+    /// image; the device is poisoned until [`recover`](Self::recover).
     pub async fn write_eeprom(&mut self) -> Result<()> {
         if !self.eeprom.initialized_for_connected_device {
             return Err(Error::Eeprom(
@@ -67,6 +73,7 @@ impl AsyncFtdiDevice {
         }
         let eeprom_size = self.eeprom.size as usize;
         let chip_type = self.chip_type();
+        let guard = self.begin_stateful_operation()?;
 
         // Initialization sequence (from MProg traces)
         self.usb_reset().await?;
@@ -88,6 +95,7 @@ impl AsyncFtdiDevice {
                 .await?;
         }
 
+        guard.disarm();
         Ok(())
     }
 
@@ -97,6 +105,9 @@ impl AsyncFtdiDevice {
     /// word wraparound test (93x46 vs 93x56 vs 93x66).
     ///
     /// Not supported on FT232R/FT245R (internal EEPROM) or FT230X (MTP).
+    /// If this future is cancelled between the wraparound test and the final
+    /// erase, the magic word remains programmed; the device is poisoned until
+    /// [`recover`](Self::recover).
     pub async fn erase_eeprom(&mut self) -> Result<()> {
         let chip_type = self.chip_type();
 
@@ -105,6 +116,7 @@ impl AsyncFtdiDevice {
             return Ok(());
         }
 
+        let guard = self.begin_stateful_operation()?;
         self.control_out(SIO_ERASE_EEPROM_REQUEST, 0, 0).await?;
 
         // Detect EEPROM chip type via wraparound test
@@ -131,6 +143,7 @@ impl AsyncFtdiDevice {
         // Erase again to clean up the magic word
         self.control_out(SIO_ERASE_EEPROM_REQUEST, 0, 0).await?;
 
+        guard.disarm();
         Ok(())
     }
 
@@ -198,6 +211,10 @@ impl AsyncFtdiDevice {
         // For FT230X, read factory data area (0x40-0x4F) from the device
         // so it's included in the checksum calculation.
         if chip_type == ChipType::Ft230X {
+            // The factory-area reads mutate the EEPROM buffer across awaits;
+            // poison the device if this future is dropped mid-loop so a
+            // half-updated buffer is never written back.
+            let guard = self.begin_stateful_operation()?;
             for i in 0x40..0x50u16 {
                 if let Ok(data) = self.control_in(SIO_READ_EEPROM_REQUEST, 0, i, 2).await {
                     if data.len() >= 2 {
@@ -206,6 +223,7 @@ impl AsyncFtdiDevice {
                     }
                 }
             }
+            guard.disarm();
         }
 
         super::build::build(&mut self.eeprom, chip_type)

@@ -1,6 +1,6 @@
 #![cfg(all(not(target_arch = "wasm32"), feature = "smol"))]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ftdi_nusb::mpsse::{
     AsyncMpsseContext,
@@ -12,10 +12,18 @@ const FTDI_VID: u16 = 0x0403;
 const FT232H_PID: u16 = 0x6014;
 
 async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
+    let timeout = dev.read_timeout();
+    let deadline = Instant::now() + timeout;
     let mut received = Vec::with_capacity(len);
     while received.len() < len {
         let mut buffer = vec![0; len - received.len()];
         let count = dev.read_data(&mut buffer).await?;
+        if count == 0 {
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout(timeout));
+            }
+            continue;
+        }
         received.extend_from_slice(&buffer[..count]);
     }
     Ok(received)
@@ -126,6 +134,17 @@ fn ft232h_async_spi_loopback() {
         }
 
         dev.recover().await?;
+        assert!(matches!(
+            mpsse.set_clock(&mut dev, 2_000_000).await,
+            Err(Error::InvalidMpsseContext)
+        ));
+        let mut mpsse = AsyncMpsseContext::init(&mut dev, 1_000_000).await?;
+        let spi = AsyncSpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
+        assert_eq!(
+            spi.transfer(&mut mpsse, &mut dev, b"reinitialized after recovery")
+                .await?,
+            b"reinitialized after recovery"
+        );
         Ok::<(), ftdi_nusb::Error>(())
     })
     .unwrap();

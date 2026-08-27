@@ -50,7 +50,7 @@ use crate::constants::mpsse;
 use crate::context::AsyncFtdiDevice;
 use crate::error::{Error, Result};
 
-use super::AsyncMpsseContext;
+use super::{AsyncMpsseContext, read_exact};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use super::blocking::JtagBus;
@@ -76,6 +76,15 @@ pub enum TapState {
     Unknown,
 }
 
+fn io_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
+    (0..total)
+        .step_by(AsyncJtagBus::MAX_MPSSE_IO_CHUNK)
+        .map(move |offset| {
+            let len = (total - offset).min(AsyncJtagBus::MAX_MPSSE_IO_CHUNK);
+            (offset, len)
+        })
+}
+
 /// JTAG bus instance using MPSSE.
 ///
 /// Manages JTAG pin configuration and TAP state tracking.
@@ -87,9 +96,18 @@ pub struct AsyncJtagBus {
     dir_mask: u8,
     /// Current tracked TAP state.
     state: TapState,
+    recovery_epoch: u64,
 }
 
 impl AsyncJtagBus {
+    fn ensure_current(&self, dev: &AsyncFtdiDevice) -> Result<()> {
+        if self.recovery_epoch == dev.recovery_epoch() {
+            Ok(())
+        } else {
+            Err(Error::InvalidMpsseContext)
+        }
+    }
+
     /// Initialize JTAG mode on the MPSSE.
     ///
     /// Configures pins for JTAG operation:
@@ -113,6 +131,7 @@ impl AsyncJtagBus {
             tms_pin,
             dir_mask,
             state: TapState::Unknown,
+            recovery_epoch: dev.recovery_epoch(),
         })
     }
 
@@ -126,6 +145,8 @@ impl AsyncJtagBus {
     /// This forces the TAP into Test-Logic-Reset regardless of its
     /// current state. Then clocks once with TMS=0 to enter Run-Test/Idle.
     pub async fn reset(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+        self.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         // WRITE_TMS: clock TMS bits out. The MPSSE command is:
         //   0x4B length_minus_1 data_byte
         // where data bits are clocked LSB first on TMS, TDI is held at bit 7.
@@ -144,6 +165,7 @@ impl AsyncJtagBus {
 
         dev.write_all(&cmd).await?;
         self.state = TapState::Idle;
+        guard.disarm();
         Ok(())
     }
 
@@ -151,6 +173,8 @@ impl AsyncJtagBus {
     ///
     /// TMS sequence: 1, 0, 0 (Select-DR-Scan -> Capture-DR -> Shift-DR).
     pub async fn goto_shift_dr(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+        self.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
         // 3 bits: TMS = 1,0,0 -> LSB first = 0b001 = 0x01
         cmd.push(mpsse::WRITE_TMS | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB);
@@ -159,6 +183,7 @@ impl AsyncJtagBus {
 
         dev.write_all(&cmd).await?;
         self.state = TapState::ShiftDr;
+        guard.disarm();
         Ok(())
     }
 
@@ -167,6 +192,8 @@ impl AsyncJtagBus {
     /// TMS sequence: 1, 1, 0, 0 (Select-DR-Scan -> Select-IR-Scan ->
     /// Capture-IR -> Shift-IR).
     pub async fn goto_shift_ir(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+        self.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
         // 4 bits: TMS = 1,1,0,0 -> LSB first = 0b0011 = 0x03
         cmd.push(mpsse::WRITE_TMS | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB);
@@ -175,6 +202,7 @@ impl AsyncJtagBus {
 
         dev.write_all(&cmd).await?;
         self.state = TapState::ShiftIr;
+        guard.disarm();
         Ok(())
     }
 
@@ -182,6 +210,8 @@ impl AsyncJtagBus {
     ///
     /// TMS sequence: 1, 0 (Update-DR/IR -> Run-Test/Idle).
     pub async fn goto_idle(&mut self, dev: &mut AsyncFtdiDevice) -> Result<()> {
+        self.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
         // 2 bits: TMS = 1,0 -> LSB first = 0b01 = 0x01
         cmd.push(mpsse::WRITE_TMS | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB);
@@ -190,6 +220,7 @@ impl AsyncJtagBus {
 
         dev.write_all(&cmd).await?;
         self.state = TapState::Idle;
+        guard.disarm();
         Ok(())
     }
 
@@ -198,10 +229,12 @@ impl AsyncJtagBus {
     /// Useful for devices that require a certain number of TCK cycles
     /// in Run-Test/Idle for internal processing.
     pub async fn idle_clocks(&self, dev: &mut AsyncFtdiDevice, count: u32) -> Result<()> {
+        self.ensure_current(dev)?;
         if count == 0 {
             return Ok(());
         }
 
+        let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::new();
 
         // Use CLK_BITS for small counts, CLK_BYTES for larger
@@ -220,12 +253,14 @@ impl AsyncJtagBus {
             }
         }
 
-        dev.write_all(&cmd).await
+        dev.write_all(&cmd).await?;
+        guard.disarm();
+        Ok(())
     }
 
-    /// Maximum bytes per single MPSSE transfer command (2-byte length field,
-    /// encoding len-1). Same limit as the SPI module.
-    const MAX_MPSSE_TRANSFER: usize = 65536;
+    /// Bound read-producing commands so responses are drained before the
+    /// MPSSE output FIFO can fill.
+    const MAX_MPSSE_IO_CHUNK: usize = 1024;
 
     /// Shift data through TDI/TDO while in Shift-DR or Shift-IR.
     ///
@@ -243,145 +278,98 @@ impl AsyncJtagBus {
     /// bits are valid (LSB first within each byte).
     pub async fn shift_bits(
         &mut self,
-        _ctx: &AsyncMpsseContext,
+        ctx: &AsyncMpsseContext,
         dev: &mut AsyncFtdiDevice,
         tdi_data: &[u8],
         bit_count: usize,
         exit_shift: bool,
     ) -> Result<Vec<u8>> {
+        self.ensure_current(dev)?;
+        ctx.ensure_current(dev)?;
         if bit_count == 0 {
             return Ok(Vec::new());
         }
 
+        let guard = dev.begin_stateful_operation()?;
         let byte_count = bit_count.div_ceil(8);
         let mut tdi = vec![0u8; byte_count];
         let copy_len = tdi_data.len().min(byte_count);
         tdi[..copy_len].copy_from_slice(&tdi_data[..copy_len]);
 
-        let mut cmd = Vec::with_capacity(16 + byte_count);
-
-        // Determine how many bits to shift with normal TMS=0 and how many
-        // with TMS=1 (the final bit, if exiting).
-        let normal_bits = if exit_shift { bit_count - 1 } else { bit_count };
-
-        // Shift full bytes (chunked to MAX_MPSSE_TRANSFER)
-        let full_bytes = normal_bits / 8;
-        let remaining_bits = normal_bits % 8;
-        let rw_cmd = mpsse::DO_WRITE | mpsse::DO_READ | mpsse::WRITE_NEG | mpsse::LSB;
-
-        {
-            let mut offset = 0;
-            while offset < full_bytes {
-                let chunk = (full_bytes - offset).min(Self::MAX_MPSSE_TRANSFER);
-                let len_field = (chunk - 1) as u16;
-                cmd.push(rw_cmd);
-                cmd.push(len_field as u8);
-                cmd.push((len_field >> 8) as u8);
-                cmd.extend_from_slice(&tdi[offset..offset + chunk]);
-                offset += chunk;
-            }
-        }
-
-        // Shift remaining bits (not including the exit bit)
-        if remaining_bits > 0 {
-            cmd.push(rw_cmd | mpsse::BITMODE);
-            cmd.push((remaining_bits - 1) as u8);
-            cmd.push(tdi[full_bytes]);
-        }
-
-        // Exit bit: clock last bit with TMS=1
-        if exit_shift {
-            let last_bit_byte_idx = (bit_count - 1) / 8;
-            let last_bit_bit_idx = (bit_count - 1) % 8;
-            let last_tdi_bit = (tdi[last_bit_byte_idx] >> last_bit_bit_idx) & 1;
-
-            // WRITE_TMS with DO_READ: TMS=1, TDI=last_bit
-            cmd.push(
-                mpsse::WRITE_TMS | mpsse::DO_READ | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB,
-            );
-            cmd.push(0); // 1 bit
-            // bit 0 = TMS value (1 = exit), bit 7 = TDI value
-            cmd.push(0x01 | (last_tdi_bit << 7));
-
-            self.state = match self.state {
+        let next_state = if exit_shift {
+            let next = match self.state {
                 TapState::ShiftDr => TapState::Exit1Dr,
                 TapState::ShiftIr => TapState::Exit1Ir,
                 _ => TapState::Unknown,
             };
-        }
+            self.state = TapState::Unknown;
+            next
+        } else {
+            self.state
+        };
 
-        cmd.push(mpsse::SEND_IMMEDIATE);
-        dev.write_all(&cmd).await?;
-
-        // Calculate expected response bytes
-        let mut expected = full_bytes; // one byte per full byte shifted
-        if remaining_bits > 0 {
-            expected += 1; // bit-mode read returns 1 byte
-        }
-        if exit_shift {
-            expected += 1; // TMS+read returns 1 byte
-        }
-
-        // Read response — error on short read (don't silently return partial data)
-        let response = Self::read_exact(dev, expected).await?;
-
-        // Reassemble TDO bits into a contiguous byte vector
+        let normal_bits = if exit_shift { bit_count - 1 } else { bit_count };
+        let full_bytes = normal_bits / 8;
+        let remaining_bits = normal_bits % 8;
+        let rw_cmd = mpsse::DO_WRITE | mpsse::DO_READ | mpsse::WRITE_NEG | mpsse::LSB;
         let mut tdo = vec![0u8; byte_count];
-        let mut tdo_bit = 0usize;
-        let mut resp_idx = 0;
 
-        // Full bytes come back as-is
-        if full_bytes > 0 {
-            tdo[..full_bytes].copy_from_slice(&response[..full_bytes]);
-            tdo_bit += full_bytes * 8;
-            resp_idx += full_bytes;
+        for (offset, chunk) in io_chunks(full_bytes) {
+            let len_field = (chunk - 1) as u16;
+            let mut cmd = Vec::with_capacity(chunk + 4);
+            cmd.extend_from_slice(&[rw_cmd, len_field as u8, (len_field >> 8) as u8]);
+            cmd.extend_from_slice(&tdi[offset..offset + chunk]);
+            cmd.push(mpsse::SEND_IMMEDIATE);
+            dev.write_all(&cmd).await?;
+            let response = read_exact(dev, chunk).await?;
+            tdo[offset..offset + chunk].copy_from_slice(&response);
         }
 
-        // Remaining bits: returned right-aligned in one byte
+        let mut tail_cmd = Vec::with_capacity(7);
         if remaining_bits > 0 {
-            let bits_byte = response[resp_idx];
-            // The MPSSE returns bit-mode reads right-shifted so the MSB of
-            // the result is in bit (8 - remaining_bits).
-            let shifted = bits_byte >> (8 - remaining_bits);
-            for bit in 0..remaining_bits {
-                if shifted & (1 << bit) != 0 {
-                    tdo[tdo_bit / 8] |= 1 << (tdo_bit % 8);
-                }
-                tdo_bit += 1;
-            }
-            resp_idx += 1;
+            tail_cmd.extend_from_slice(&[
+                rw_cmd | mpsse::BITMODE,
+                (remaining_bits - 1) as u8,
+                tdi[full_bytes],
+            ]);
+        }
+        if exit_shift {
+            let last_bit_byte_idx = (bit_count - 1) / 8;
+            let last_bit_bit_idx = (bit_count - 1) % 8;
+            let last_tdi_bit = (tdi[last_bit_byte_idx] >> last_bit_bit_idx) & 1;
+            tail_cmd.extend_from_slice(&[
+                mpsse::WRITE_TMS | mpsse::DO_READ | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB,
+                0,
+                0x01 | (last_tdi_bit << 7),
+            ]);
         }
 
-        // Exit bit: WRITE_TMS + DO_READ returns the sampled TDO in bit 7
-        // of the response byte (per FTDI AN-108).
-        if exit_shift {
-            let tms_byte = response[resp_idx];
-            if tms_byte & 0x80 != 0 {
+        if !tail_cmd.is_empty() {
+            tail_cmd.push(mpsse::SEND_IMMEDIATE);
+            dev.write_all(&tail_cmd).await?;
+            let expected = usize::from(remaining_bits > 0) + usize::from(exit_shift);
+            let response = read_exact(dev, expected).await?;
+            let mut response_index = 0;
+            let mut tdo_bit = full_bytes * 8;
+
+            if remaining_bits > 0 {
+                let shifted = response[response_index] >> (8 - remaining_bits);
+                for bit in 0..remaining_bits {
+                    if shifted & (1 << bit) != 0 {
+                        tdo[tdo_bit / 8] |= 1 << (tdo_bit % 8);
+                    }
+                    tdo_bit += 1;
+                }
+                response_index += 1;
+            }
+            if exit_shift && response[response_index] & 0x80 != 0 {
                 tdo[tdo_bit / 8] |= 1 << (tdo_bit % 8);
             }
         }
 
+        self.state = next_state;
+        guard.disarm();
         Ok(tdo)
-    }
-
-    /// Read exactly `len` bytes from the device, returning an error on short reads.
-    async fn read_exact(dev: &mut AsyncFtdiDevice, len: usize) -> Result<Vec<u8>> {
-        let mut buf = vec![0u8; len];
-        let mut offset = 0;
-        let mut empty_reads = 0;
-        while offset < len {
-            let n = dev.read_data(&mut buf[offset..]).await?;
-            if n == 0 {
-                empty_reads += 1;
-                if empty_reads >= 10 {
-                    return Err(Error::Timeout(dev.read_timeout()));
-                }
-                continue;
-            }
-            empty_reads = 0;
-            offset += n;
-        }
-        Ok(buf)
     }
 
     /// Write an IR value and return to Run-Test/Idle.
@@ -434,11 +422,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn large_shifts_are_planned_as_bounded_read_chunks() {
+        assert_eq!(
+            io_chunks(1025).collect::<Vec<_>>(),
+            vec![(0, 1024), (1024, 1)]
+        );
+        assert!(io_chunks(70_000).all(|(_, len)| len <= 1024));
+    }
+
+    #[test]
     fn tap_state_initial_is_unknown() {
         let bus = AsyncJtagBus {
             tms_pin: 0x08,
             dir_mask: 0x0B,
             state: TapState::Unknown,
+            recovery_epoch: 0,
         };
         assert_eq!(bus.state(), TapState::Unknown);
     }
@@ -492,6 +490,7 @@ mod tests {
             tms_pin: 0x08,
             dir_mask: 0x0B,
             state: TapState::Unknown,
+            recovery_epoch: 0,
         };
         // TCK=bit0, TDI=bit1, TDO=bit2 (input), TMS=bit3
         assert_eq!(bus.tms_pin(), 0x08);

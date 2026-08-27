@@ -4,7 +4,9 @@
 //! configured FTDI USB device and provides methods for serial communication,
 //! bitbang/MPSSE mode, flow control, and EEPROM access.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
+use std::sync::Arc;
 
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 
@@ -68,6 +70,7 @@ where
     .await
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn clear_pending_transfers<EpType, Dir>(
     endpoint: &mut nusb::Endpoint<EpType, Dir>,
     deadline: TransferDeadline,
@@ -122,6 +125,34 @@ async fn async_sleep(duration: Duration) {
 
     #[cfg(target_arch = "wasm32")]
     crate::sleep_util::sleep(duration).await;
+}
+
+/// Marks a device as requiring recovery if a stateful future is dropped or
+/// returns before explicitly completing its cleanup.
+pub(crate) struct RecoveryGuard {
+    recovery_required: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl RecoveryGuard {
+    pub(crate) fn new(recovery_required: Arc<AtomicBool>) -> Self {
+        Self {
+            recovery_required,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RecoveryGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.recovery_required.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// An opened FTDI USB device.
@@ -181,6 +212,11 @@ pub struct AsyncFtdiDevice {
 
     // EEPROM
     pub(crate) eeprom: FtdiEeprom,
+
+    // Set by cancellation/failure of stateful protocol operations. Shared with
+    // guards so dropping a future can poison the device without async Drop.
+    recovery_required: Arc<AtomicBool>,
+    recovery_epoch: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -248,6 +284,8 @@ impl AsyncFtdiDevice {
             write_ep: config.write_ep,
             read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
+            recovery_required: Arc::new(AtomicBool::new(false)),
+            recovery_epoch: 0,
         })
     }
 
@@ -402,6 +440,8 @@ impl AsyncFtdiDevice {
             write_ep: config.write_ep,
             read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
+            recovery_required: Arc::new(AtomicBool::new(false)),
+            recovery_epoch: 0,
         };
 
         // Reset device
@@ -523,6 +563,8 @@ impl AsyncFtdiDevice {
             write_ep: config.write_ep,
             read_ep: config.read_ep,
             eeprom: FtdiEeprom::default(),
+            recovery_required: Arc::new(AtomicBool::new(false)),
+            recovery_epoch: 0,
         };
 
         // Reset device.
@@ -573,12 +615,41 @@ impl AsyncFtdiDevice {
         &mut self.read_endpoint
     }
 
+    pub(crate) fn ensure_ready(&self) -> Result<()> {
+        if self.recovery_required.load(Ordering::Acquire) {
+            Err(Error::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn begin_stateful_operation(&self) -> Result<RecoveryGuard> {
+        self.ensure_ready()?;
+        Ok(RecoveryGuard::new(Arc::clone(&self.recovery_required)))
+    }
+
+    pub(crate) fn recovery_epoch(&self) -> u64 {
+        self.recovery_epoch
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn mark_recovery_required(&self) {
+        self.recovery_required.store(true, Ordering::Release);
+    }
+
+    /// Temporarily permit best-effort cleanup while an outer armed
+    /// [`RecoveryGuard`] still owns the final ready/poisoned decision.
+    pub(crate) fn prepare_stateful_cleanup(&self) {
+        self.recovery_required.store(false, Ordering::Release);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn mark_stream_abandoned(&mut self) {
         // `recover` must return an abandoned stream to UART/reset mode rather
         // than restoring the synchronous-FIFO mode that was interrupted.
         self.bitbang_enabled = false;
         self.bitbang_mode = BitMode::Reset;
+        self.mark_recovery_required();
     }
 
     /// Open the bulk IN endpoint (device -> host) for reading.
@@ -632,6 +703,7 @@ impl AsyncFtdiDevice {
 
     /// Send a vendor OUT control transfer to the device.
     pub(crate) async fn control_out(&self, request: u8, value: u16, index: u16) -> Result<()> {
+        self.ensure_ready()?;
         (self
             .interface
             .control_out(
@@ -657,6 +729,7 @@ impl AsyncFtdiDevice {
         index: u16,
         length: u16,
     ) -> Result<Vec<u8>> {
+        self.ensure_ready()?;
         let data = (self
             .interface
             .control_in(
@@ -704,6 +777,23 @@ impl AsyncFtdiDevice {
     /// drained, matching the behavior of the proprietary FTDI driver.
     /// This is important for reliable operation in FT245 FIFO mode.
     pub async fn flush_rx(&mut self) -> Result<()> {
+        // A cancelled/timed-out read may still own an endpoint transfer. Drain
+        // it before purging so pre-flush bytes cannot be resumed afterward.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let deadline = TransferDeadline::new(self.read_timeout);
+            self.read_endpoint.cancel_all();
+            if !clear_pending_transfers(&mut self.read_endpoint, deadline).await {
+                return Err(Error::Timeout(self.read_timeout));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        while self.read_endpoint.pending() > 0 {
+            // WebUSB has no cancellation API. FTDI IN transfers still finish
+            // on the latency timer, so consume the old completion before purge.
+            self.read_endpoint.next_complete().await;
+        }
+
         // The proprietary driver sends the RX purge command 6 times
         // to ensure reliable FIFO draining.
         for _ in 0..6 {
@@ -1045,6 +1135,23 @@ impl AsyncFtdiDevice {
 // ---- Data Transfer ----
 
 impl AsyncFtdiDevice {
+    async fn complete_pending_writes(&mut self, deadline: TransferDeadline) -> Result<()> {
+        while self.write_endpoint.pending() > 0 {
+            let completion = wait_for_completion(&mut self.write_endpoint, deadline)
+                .await
+                .ok_or(Error::Timeout(self.write_timeout))?;
+            completion.status.map_err(Error::Transfer)?;
+            let expected = completion.buffer.requested_len();
+            if completion.actual_len != expected {
+                return Err(Error::ShortWrite {
+                    expected,
+                    actual: completion.actual_len,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Write data to the FTDI device.
     ///
     /// Data is sent in chunks of [`write_chunksize`](Self::write_chunksize).
@@ -1054,6 +1161,7 @@ impl AsyncFtdiDevice {
     /// The next write waits for that chunk before submitting new data, so callers
     /// must treat cancellation as a possibly-partial write.
     pub async fn write_data(&mut self, buf: &[u8]) -> Result<usize> {
+        self.ensure_ready()?;
         let mut offset = 0;
 
         while offset < buf.len() {
@@ -1064,16 +1172,10 @@ impl AsyncFtdiDevice {
             transfer_buf.extend_from_slice(chunk);
 
             let deadline = TransferDeadline::new(self.write_timeout);
-            if !clear_pending_transfers(&mut self.write_endpoint, deadline).await {
-                return Err(Error::Timeout(self.write_timeout));
-            }
+            self.complete_pending_writes(deadline).await?;
             self.write_endpoint.submit(transfer_buf);
-
-            let completion = wait_for_completion(&mut self.write_endpoint, deadline)
-                .await
-                .ok_or(Error::Timeout(self.write_timeout))?;
-            completion.status.map_err(Error::Transfer)?;
-            offset += completion.actual_len;
+            self.complete_pending_writes(deadline).await?;
+            offset = end;
         }
 
         Ok(offset)
@@ -1090,6 +1192,7 @@ impl AsyncFtdiDevice {
     /// This operation is cancellation-safe with respect to input consumption:
     /// an in-flight USB read remains queued and the next call resumes it.
     pub async fn read_data(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.ensure_ready()?;
         if buf.is_empty() {
             return Ok(0);
         }
@@ -1332,6 +1435,12 @@ impl AsyncFtdiDevice {
     /// Call this after dropping a stateful operation such as a streaming session
     /// before issuing unrelated protocol commands.
     pub async fn recover(&mut self) -> Result<()> {
+        let recovery_guard = RecoveryGuard::new(Arc::clone(&self.recovery_required));
+        // Recovery is the only operation allowed to clear the poison
+        // temporarily. The armed guard restores it if recovery fails or is
+        // cancelled before all device state has been rebuilt.
+        self.recovery_required.store(false, Ordering::Release);
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             let read_deadline = TransferDeadline::new(self.read_timeout);
@@ -1361,6 +1470,9 @@ impl AsyncFtdiDevice {
         if restore_bitbang {
             self.set_bitmode(0xFF, bitbang_mode).await?;
         }
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        self.recovery_required.store(false, Ordering::Release);
+        recovery_guard.disarm();
         Ok(())
     }
 }
@@ -1368,6 +1480,20 @@ impl AsyncFtdiDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_guard_marks_cancelled_operation_dirty() {
+        let recovery_required = Arc::new(AtomicBool::new(false));
+        drop(RecoveryGuard::new(Arc::clone(&recovery_required)));
+        assert!(recovery_required.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn disarmed_recovery_guard_leaves_device_ready() {
+        let recovery_required = Arc::new(AtomicBool::new(false));
+        RecoveryGuard::new(Arc::clone(&recovery_required)).disarm();
+        assert!(!recovery_required.load(Ordering::Acquire));
+    }
 
     #[test]
     fn read_transfer_size_accounts_for_status_bytes() {

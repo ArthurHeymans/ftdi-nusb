@@ -146,13 +146,19 @@ impl FtdiStream<'_> {
             let mut completion = match completion {
                 Ok(completion) => completion,
                 Err(error) => {
-                    let _ = self.finish_inner().await;
+                    if let Err(cleanup_error) = self.finish_inner().await {
+                        log::warn!("stream cleanup after {error} failed: {cleanup_error}");
+                    }
                     return Err(error);
                 }
             };
 
             if let Err(error) = completion.status {
-                let _ = self.finish_inner().await;
+                if let Err(cleanup_error) = self.finish_inner().await {
+                    log::warn!(
+                        "stream cleanup after transfer error {error} failed: {cleanup_error}"
+                    );
+                }
                 return Err(Error::Transfer(error));
             }
 
@@ -204,8 +210,9 @@ impl FtdiStream<'_> {
         }
 
         cancel_and_drain(self.device.read_endpoint_mut(), self.timeout).await?;
+        self.device.set_bitmode(0xFF, BitMode::Reset).await?;
         self.finished = true;
-        self.device.set_bitmode(0xFF, BitMode::Reset).await
+        Ok(())
     }
 }
 
@@ -252,6 +259,7 @@ impl AsyncFtdiDevice {
             .filter(|size| *size <= u32::MAX as usize)
             .ok_or(Error::InvalidArgument("stream buffer size overflow"))?;
         let timeout = self.read_timeout();
+        let setup_guard = self.begin_stateful_operation()?;
 
         self.set_bitmode(0xFF, BitMode::Reset).await?;
         self.flush_all().await?;
@@ -271,6 +279,7 @@ impl AsyncFtdiDevice {
         }
 
         let start = Instant::now();
+        setup_guard.disarm();
         Ok(FtdiStream {
             device: self,
             timeout,

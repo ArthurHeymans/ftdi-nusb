@@ -183,20 +183,18 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
             for op in operations.iter_mut() {
                 match op {
                     Operation::Read(buf) => {
-                        let data = self.spi.read(&mut self.ctx, &mut self.dev, buf.len())?;
+                        let data = self.spi.read_raw(&mut self.dev, buf.len())?;
                         buf.copy_from_slice(&data);
                     }
                     Operation::Write(buf) => {
-                        self.spi.write(&mut self.ctx, &mut self.dev, buf)?;
+                        self.spi.write_raw(&mut self.dev, buf)?;
                     }
                     Operation::Transfer(read, write) => {
-                        let data = self.spi.transfer(&mut self.ctx, &mut self.dev, write)?;
-                        let copy_len = read.len().min(data.len());
-                        read[..copy_len].copy_from_slice(&data[..copy_len]);
+                        self.spi.transfer_into_raw(&mut self.dev, read, write)?;
                     }
                     Operation::TransferInPlace(buf) => {
-                        let data = self.spi.transfer(&mut self.ctx, &mut self.dev, buf)?;
-                        buf.copy_from_slice(&data);
+                        let write = buf.to_vec();
+                        self.spi.transfer_into_raw(&mut self.dev, buf, &write)?;
                     }
                     Operation::DelayNs(ns) => {
                         std::thread::sleep(std::time::Duration::from_nanos(*ns as u64));
@@ -208,6 +206,10 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
 
         // Always deassert CS, even on error
         let cs_result = self.spi.cs_deassert(&mut self.ctx, &mut self.dev);
+
+        if result.is_err() || cs_result.is_err() {
+            self.dev.as_async_mut().mark_recovery_required();
+        }
 
         // Return the first error
         result?;

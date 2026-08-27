@@ -138,6 +138,23 @@ impl SpiDevice {
     pub fn cs_deassert(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
         futures_lite::future::block_on(self.0.cs_deassert(ctx.as_async_mut(), dev.as_async_mut()))
     }
+    #[cfg(feature = "embedded-hal")]
+    pub(crate) fn transfer_into_raw(
+        &self,
+        dev: &mut FtdiDevice,
+        read: &mut [u8],
+        write: &[u8],
+    ) -> Result<()> {
+        futures_lite::future::block_on(self.0.transfer_into_raw(dev.as_async_mut(), read, write))
+    }
+    #[cfg(feature = "embedded-hal")]
+    pub(crate) fn write_raw(&self, dev: &mut FtdiDevice, tx: &[u8]) -> Result<()> {
+        futures_lite::future::block_on(self.0.write_raw(dev.as_async_mut(), tx))
+    }
+    #[cfg(feature = "embedded-hal")]
+    pub(crate) fn read_raw(&self, dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
+        futures_lite::future::block_on(self.0.read_raw(dev.as_async_mut(), len))
+    }
     pub fn transfer(
         &self,
         ctx: &mut MpsseContext,

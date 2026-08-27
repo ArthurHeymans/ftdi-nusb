@@ -173,10 +173,13 @@ remain on those blocking wrappers.
 Async reads preserve an in-flight USB read when their future is cancelled, so
 the next read resumes without silently discarding serial input. Writes may have
 partially completed when cancelled. Stateful protocol or streaming sessions
-should be finished explicitly; call `AsyncFtdiDevice::recover().await` after
-dropping an unfinished session.
+should be finished explicitly. If one is cancelled or dropped, subsequent I/O
+returns `Error::RecoveryRequired` until
+`AsyncFtdiDevice::recover().await` succeeds. Recovery invalidates existing MPSSE
+contexts and bus objects; initialize them again before issuing more MPSSE
+commands.
 
-### Async streaming
+### Async streaming (native only)
 
 ```rust,no_run
 use ftdi_nusb::{AsyncFtdiDevice, StreamEvent};
