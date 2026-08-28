@@ -239,11 +239,15 @@ impl JtagBus {
         let mut remaining = count;
         while remaining > 0 {
             if remaining >= 8 {
-                let bytes = (remaining / 8).min(0x10000) as u16;
+                // CLK_BYTES encodes (bytes - 1) as u16, so at most 0x10000
+                // bytes per command. Keep the count in u32 to avoid `as u16`
+                // truncating 0x10000 to 0.
+                let bytes = (remaining / 8).min(0x10000);
+                let encoded = bytes - 1;
                 cmd.push(mpsse::CLK_BYTES);
-                cmd.push((bytes - 1) as u8);
-                cmd.push(((bytes - 1) >> 8) as u8);
-                remaining -= bytes as u32 * 8;
+                cmd.push(encoded as u8);
+                cmd.push((encoded >> 8) as u8);
+                remaining -= bytes * 8;
             } else {
                 cmd.push(mpsse::CLK_BITS);
                 cmd.push((remaining - 1) as u8);
