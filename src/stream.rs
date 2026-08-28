@@ -60,6 +60,7 @@ impl FtdiStream<'_> {
     /// USB transfer failures and inactivity timeouts are returned as errors.
     /// Transfer buffers are recycled after each successful completion.
     pub async fn next(&mut self) -> Result<Option<StreamEvent>> {
+        self.device.ensure_ready()?;
         if self.finished {
             return Ok(None);
         }
@@ -148,10 +149,19 @@ impl FtdiStream<'_> {
             return Ok(());
         }
 
-        cancel_and_drain(self.device.read_endpoint_mut(), self.timeout).await?;
-        self.device.set_bitmode(0xFF, BitMode::Reset).await?;
+        let result = match cancel_and_drain(self.device.read_endpoint_mut(), self.timeout).await {
+            Ok(()) => self.device.set_bitmode(0xFF, BitMode::Reset).await,
+            Err(error) => Err(error),
+        };
+        // Failed cleanup leaves the device in an unknown mode, possibly with
+        // an empty transfer queue. Mark the session terminal and poison the
+        // device so a subsequent `next` reports `RecoveryRequired` instead of
+        // waiting on a queue that will never produce a completion.
+        if result.is_err() {
+            self.device.mark_stream_abandoned();
+        }
         self.finished = true;
-        Ok(())
+        result
     }
 }
 
