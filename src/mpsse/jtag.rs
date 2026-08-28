@@ -92,6 +92,8 @@ pub struct JtagBus {
     dir_mask: u8,
     /// Current tracked TAP state.
     state: TapState,
+    /// Whether H-series clock-only commands are available.
+    is_h_type: bool,
     recovery_epoch: u64,
     protocol_epoch: u64,
     device_id: u64,
@@ -138,6 +140,7 @@ impl JtagBus {
             tms_pin,
             dir_mask,
             state: TapState::Unknown,
+            is_h_type: s.ctx().is_h_type(),
             recovery_epoch: s.dev.recovery_epoch(),
             protocol_epoch,
             device_id: s.dev.device_id(),
@@ -244,25 +247,55 @@ impl JtagBus {
         }
 
         let guard = s.dev.begin_stateful_operation()?;
-        let mut cmd = Vec::new();
-
-        // Use CLK_BITS for small counts, CLK_BYTES for larger
         let mut remaining = count;
-        while remaining > 0 {
-            if remaining >= 8 {
-                let bytes = (remaining / 8).min(0x10000) as u16;
-                cmd.push(mpsse::CLK_BYTES);
-                cmd.push((bytes - 1) as u8);
-                cmd.push(((bytes - 1) >> 8) as u8);
+
+        if self.is_h_type {
+            let mut cmd = Vec::new();
+            while remaining > 0 {
+                if remaining >= 8 {
+                    // CLK_BYTES encodes (bytes - 1) as u16, so at most 0x10000
+                    // bytes per command. Keep the count in u32 to avoid `as u16`
+                    // truncating 0x10000 to 0.
+                    let bytes = (remaining / 8).min(0x10000);
+                    let encoded = bytes - 1;
+                    cmd.push(mpsse::CLK_BYTES);
+                    cmd.push(encoded as u8);
+                    cmd.push((encoded >> 8) as u8);
+                    remaining -= bytes * 8;
+                } else {
+                    cmd.push(mpsse::CLK_BITS);
+                    cmd.push((remaining - 1) as u8);
+                    remaining = 0;
+                }
+            }
+            s.dev.write_all(&cmd).await?;
+        } else {
+            // FT2232C does not implement the H-series CLK_BITS/CLK_BYTES
+            // opcodes. Generate the same clocks by shifting zero TDI data in
+            // bounded chunks while TMS remains low in Run-Test/Idle.
+            while remaining >= 8 {
+                let bytes = (remaining / 8).min(Self::MAX_MPSSE_IO_CHUNK as u32) as usize;
+                let encoded = (bytes - 1) as u16;
+                let mut cmd = vec![
+                    mpsse::DO_WRITE | mpsse::WRITE_NEG | mpsse::LSB,
+                    encoded as u8,
+                    (encoded >> 8) as u8,
+                ];
+                cmd.resize(3 + bytes, 0);
+                s.dev.write_all(&cmd).await?;
                 remaining -= bytes as u32 * 8;
-            } else {
-                cmd.push(mpsse::CLK_BITS);
-                cmd.push((remaining - 1) as u8);
-                remaining = 0;
+            }
+            if remaining > 0 {
+                s.dev
+                    .write_all(&[
+                        mpsse::DO_WRITE | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB,
+                        (remaining - 1) as u8,
+                        0,
+                    ])
+                    .await?;
             }
         }
 
-        s.dev.write_all(&cmd).await?;
         guard.disarm();
         Ok(())
     }
@@ -441,6 +474,7 @@ mod tests {
             tms_pin: 0x08,
             dir_mask: 0x0B,
             state: TapState::Unknown,
+            is_h_type: true,
             recovery_epoch: 0,
             protocol_epoch: 0,
             device_id: 0,
@@ -497,6 +531,7 @@ mod tests {
             tms_pin: 0x08,
             dir_mask: 0x0B,
             state: TapState::Unknown,
+            is_h_type: true,
             recovery_epoch: 0,
             protocol_epoch: 0,
             device_id: 0,
