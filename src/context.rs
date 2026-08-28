@@ -1245,8 +1245,14 @@ impl FtdiDevice {
             return Ok(0);
         }
 
-        // Copy raw data into our internal buffer for stripping
+        // Copy raw data into our internal buffer for stripping. A transfer
+        // left pending by a cancelled read may be larger than the current
+        // buffer if `set_read_chunksize` shrank it in between, so grow the
+        // buffer to fit the completion instead of slicing out of bounds.
         let raw_data = completion.buffer.into_vec();
+        if self.readbuffer.len() < actual_length {
+            self.readbuffer.resize(actual_length, 0);
+        }
         self.readbuffer[..actual_length].copy_from_slice(&raw_data[..actual_length]);
 
         // Strip 2-byte modem status from each max_packet_size chunk
