@@ -209,6 +209,8 @@ pub struct FtdiDevice {
     baudrate: u32,
     bitbang_enabled: bool,
     bitbang_mode: BitMode,
+    // Direction mask last passed to set_bitmode; replayed by recovery.
+    bitbang_mask: u8,
     read_timeout: Duration,
     write_timeout: Duration,
 
@@ -283,6 +285,7 @@ impl FtdiDevice {
             baudrate: 0,
             bitbang_enabled: false,
             bitbang_mode: BitMode::Reset,
+            bitbang_mask: 0,
             read_timeout: DEFAULT_TIMEOUT,
             write_timeout: DEFAULT_TIMEOUT,
             readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
@@ -438,6 +441,7 @@ impl FtdiDevice {
             baudrate: 0,
             bitbang_enabled: false,
             bitbang_mode: BitMode::Reset,
+            bitbang_mask: 0,
             read_timeout: DEFAULT_TIMEOUT,
             write_timeout: DEFAULT_TIMEOUT,
             readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
@@ -560,6 +564,7 @@ impl FtdiDevice {
             baudrate: 0,
             bitbang_enabled: false,
             bitbang_mode: BitMode::Reset,
+            bitbang_mask: 0,
             read_timeout: DEFAULT_TIMEOUT,
             write_timeout: DEFAULT_TIMEOUT,
             readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
@@ -1066,6 +1071,7 @@ impl FtdiDevice {
 
         self.bitbang_mode = mode;
         self.bitbang_enabled = mode != BitMode::Reset;
+        self.bitbang_mask = bitmask;
         guard.disarm();
         Ok(())
     }
@@ -1451,6 +1457,7 @@ impl FtdiDevice {
         let baudrate = self.baudrate;
         let restore_bitbang = self.bitbang_enabled;
         let bitbang_mode = self.bitbang_mode;
+        let bitbang_mask = self.bitbang_mask;
 
         self.usb_reset().await?;
         // The FTDI USB reset request does not reliably leave synchronous FIFO
@@ -1460,7 +1467,7 @@ impl FtdiDevice {
             self.set_baudrate(baudrate).await?;
         }
         if restore_bitbang {
-            self.set_bitmode(0xFF, bitbang_mode).await?;
+            self.set_bitmode(bitbang_mask, bitbang_mode).await?;
         }
         self.bump_recovery_epoch();
         self.recovery_required.store(false, Ordering::Release);
