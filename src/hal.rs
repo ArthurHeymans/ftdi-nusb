@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! ftdi = { version = "0.1", features = ["embedded-hal"] }
+//! ftdi-nusb = { version = "0.3", features = ["embedded-hal"] }
 //! ```
 //!
 //! # Provided implementations

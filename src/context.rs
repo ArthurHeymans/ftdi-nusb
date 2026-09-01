@@ -217,6 +217,8 @@ pub struct FtdiDevice {
     baudrate: u32,
     bitbang_enabled: bool,
     bitbang_mode: BitMode,
+    // Direction mask last passed to set_bitmode; replayed by recovery.
+    bitbang_mask: u8,
     read_timeout: Duration,
     write_timeout: Duration,
 
@@ -292,6 +294,7 @@ impl FtdiDevice {
             baudrate: 0,
             bitbang_enabled: false,
             bitbang_mode: BitMode::Reset,
+            bitbang_mask: 0,
             read_timeout: DEFAULT_TIMEOUT,
             write_timeout: DEFAULT_TIMEOUT,
             readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
@@ -448,6 +451,7 @@ impl FtdiDevice {
             baudrate: 0,
             bitbang_enabled: false,
             bitbang_mode: BitMode::Reset,
+            bitbang_mask: 0,
             read_timeout: DEFAULT_TIMEOUT,
             write_timeout: DEFAULT_TIMEOUT,
             readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
@@ -571,6 +575,7 @@ impl FtdiDevice {
             baudrate: 0,
             bitbang_enabled: false,
             bitbang_mode: BitMode::Reset,
+            bitbang_mask: 0,
             read_timeout: DEFAULT_TIMEOUT,
             write_timeout: DEFAULT_TIMEOUT,
             readbuffer: vec![0u8; DEFAULT_CHUNKSIZE],
@@ -752,6 +757,10 @@ impl FtdiDevice {
     /// The proprietary FTDI driver sends this with `index=0` (a full
     /// device reset, not interface-specific), which we replicate here.
     pub async fn usb_reset(&mut self) -> Result<()> {
+        // Cancellation after the reset reaches the device would leave the
+        // software state (baud rate, bitbang mode, read buffer) describing
+        // the pre-reset hardware, so poison the device in that case.
+        let guard = self.begin_stateful_operation()?;
         // The proprietary driver always uses index=0 for a full device reset,
         // not the interface-specific index.
         self.control_out(SIO_RESET_REQUEST, SIO_RESET_SIO, 0)
@@ -759,6 +768,7 @@ impl FtdiDevice {
         self.readbuffer_offset = 0;
         self.readbuffer_remaining = 0;
         self.bump_recovery_epoch();
+        guard.disarm();
         Ok(())
     }
 
@@ -771,6 +781,10 @@ impl FtdiDevice {
     /// drained, matching the behavior of the proprietary FTDI driver.
     /// This is important for reliable operation in FT245 FIFO mode.
     pub async fn flush_rx(&mut self) -> Result<()> {
+        // Cancellation between the hardware purge and clearing the software
+        // read buffer would resurface supposedly-flushed bytes; poison the
+        // device if this future is dropped mid-flush.
+        let guard = self.begin_stateful_operation()?;
         // A cancelled/timed-out read may still own an endpoint transfer. Drain
         // it before purging so pre-flush bytes cannot be resumed afterward.
         #[cfg(not(target_arch = "wasm32"))]
@@ -790,6 +804,7 @@ impl FtdiDevice {
         }
         self.readbuffer_offset = 0;
         self.readbuffer_remaining = 0;
+        guard.disarm();
         Ok(())
     }
 
@@ -848,9 +863,13 @@ impl FtdiDevice {
             });
         }
 
+        // Cancellation after the request reaches the device would desync
+        // `self.baudrate` (which recovery replays) from the hardware.
+        let guard = self.begin_stateful_operation()?;
         self.control_out(SIO_SET_BAUDRATE_REQUEST, result.value, result.index)
             .await?;
         self.baudrate = baudrate;
+        guard.disarm();
         Ok(())
     }
 
@@ -1067,13 +1086,19 @@ impl FtdiDevice {
 impl FtdiDevice {
     /// Enable a bitbang or MPSSE mode.
     pub async fn set_bitmode(&mut self, bitmask: u8, mode: BitMode) -> Result<()> {
+        // Cancellation after the request reaches the device would desync the
+        // recorded bitbang mode (which recovery replays and the baud-rate
+        // multiplier depends on) from the hardware.
+        let guard = self.begin_stateful_operation()?;
         let val = (bitmask as u16) | ((mode.wire_value() as u16) << 8);
         self.control_out(SIO_SET_BITMODE_REQUEST, val, self.usb_index)
             .await?;
 
         self.bitbang_mode = mode;
         self.bitbang_enabled = mode != BitMode::Reset;
+        self.bitbang_mask = bitmask;
         self.bump_recovery_epoch();
+        guard.disarm();
         Ok(())
     }
 
@@ -1245,8 +1270,14 @@ impl FtdiDevice {
             return Ok(0);
         }
 
-        // Copy raw data into our internal buffer for stripping
+        // Copy raw data into our internal buffer for stripping. A transfer
+        // left pending by a cancelled read may be larger than the current
+        // buffer if `set_read_chunksize` shrank it in between, so grow the
+        // buffer to fit the completion instead of slicing out of bounds.
         let raw_data = completion.buffer.into_vec();
+        if self.readbuffer.len() < actual_length {
+            self.readbuffer.resize(actual_length, 0);
+        }
         self.readbuffer[..actual_length].copy_from_slice(&raw_data[..actual_length]);
 
         // Strip 2-byte modem status from each max_packet_size chunk
@@ -1483,6 +1514,7 @@ impl FtdiDevice {
         let baudrate = self.baudrate;
         let restore_bitbang = self.bitbang_enabled;
         let bitbang_mode = self.bitbang_mode;
+        let bitbang_mask = self.bitbang_mask;
 
         self.usb_reset().await?;
         // The FTDI USB reset request does not reliably leave synchronous FIFO
@@ -1492,7 +1524,7 @@ impl FtdiDevice {
             self.set_baudrate(baudrate).await?;
         }
         if restore_bitbang {
-            self.set_bitmode(0xFF, bitbang_mode).await?;
+            self.set_bitmode(bitbang_mask, bitbang_mode).await?;
         }
         self.bump_recovery_epoch();
         self.recovery_required.store(false, Ordering::Release);
