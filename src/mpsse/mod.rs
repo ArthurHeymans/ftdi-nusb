@@ -41,6 +41,29 @@ impl ReadDeadline {
     }
 }
 
+fn clock_divisor_command(is_h_type: bool, divisor: u16) -> Result<(Vec<u8>, u32)> {
+    if divisor < 2 || divisor % 2 != 0 {
+        return Err(Error::InvalidArgument(
+            "clock divisor must be even and at least 2",
+        ));
+    }
+
+    let register_divisor = divisor / 2 - 1;
+    let mut cmd = Vec::with_capacity(4);
+    let source_clock = if is_h_type {
+        cmd.push(mpsse::DIS_DIV_5);
+        60_000_000
+    } else {
+        12_000_000
+    };
+    cmd.extend_from_slice(&[
+        mpsse::TCK_DIVISOR,
+        register_divisor as u8,
+        (register_divisor >> 8) as u8,
+    ]);
+    Ok((cmd, source_clock / divisor as u32))
+}
+
 pub(super) async fn read_exact(dev: &mut FtdiDevice, len: usize) -> Result<Vec<u8>> {
     let deadline = ReadDeadline::new(dev.read_timeout());
     let mut buf = vec![0; len];
@@ -226,6 +249,21 @@ impl MpsseSession<'_> {
         Ok(())
     }
 
+    /// Set the MPSSE clock using the FTDI frequency divisor directly.
+    ///
+    /// `divisor` is the even divisor applied to the chip's fastest MPSSE
+    /// source clock: 60 MHz on H-type parts and 12 MHz on older parts. This
+    /// matches the divisor convention used by libftdi and flashrom adapters.
+    pub async fn set_clock_divisor(&mut self, divisor: u16) -> Result<()> {
+        let (cmd, actual_clock) = clock_divisor_command(self.ctx.is_h_type, divisor)?;
+
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev.write_all(&cmd).await?;
+        self.ctx.clock_hz = actual_clock;
+        guard.disarm();
+        Ok(())
+    }
+
     pub async fn enable_3phase_clocking(&mut self) -> Result<()> {
         if !self.ctx.is_h_type {
             return Err(Error::InvalidArgument(
@@ -284,6 +322,20 @@ impl MpsseSession<'_> {
             .await?;
         self.ctx.gpio_high_value = value;
         self.ctx.gpio_high_dir = direction;
+        guard.disarm();
+        Ok(())
+    }
+
+    /// Tristate all low- and high-byte MPSSE GPIO pins.
+    pub async fn release_pins(&mut self) -> Result<()> {
+        let guard = self.dev.begin_stateful_operation()?;
+        self.dev
+            .write_all(&[mpsse::SET_BITS_LOW, 0, 0, mpsse::SET_BITS_HIGH, 0, 0])
+            .await?;
+        self.ctx.gpio_low_value = 0;
+        self.ctx.gpio_low_dir = 0;
+        self.ctx.gpio_high_value = 0;
+        self.ctx.gpio_high_dir = 0;
         guard.disarm();
         Ok(())
     }
@@ -400,6 +452,20 @@ impl MpsseContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_clock_divisor_matches_flashrom_convention() {
+        assert_eq!(
+            clock_divisor_command(true, 2).unwrap(),
+            (vec![mpsse::DIS_DIV_5, mpsse::TCK_DIVISOR, 0, 0], 30_000_000)
+        );
+        assert_eq!(
+            clock_divisor_command(false, 6).unwrap(),
+            (vec![mpsse::TCK_DIVISOR, 2, 0], 2_000_000)
+        );
+        assert!(clock_divisor_command(true, 1).is_err());
+        assert!(clock_divisor_command(true, 3).is_err());
+    }
 
     #[test]
     fn clock_divisor_calculations() {

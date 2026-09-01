@@ -51,6 +51,9 @@ reworks MPSSE and streaming around it. It is a breaking release.
   configurations likewise invalidates objects from the previous protocol
 - `Error::RecoveryRequired`, `Error::InvalidMpsseContext`, and
   `Error::ShortWrite` variants
+- `mpsse::spi::SpiConfig` for CS masks plus auxiliary low/high-byte idle
+  levels and directions, batched write-then-read SPI transactions, raw
+  MPSSE clock-divisor configuration, and a helper to tristate MPSSE pins
 
 ### Removed
 
