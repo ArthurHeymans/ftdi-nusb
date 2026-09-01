@@ -108,6 +108,95 @@ impl SpiMode {
 }
 
 /// Configuration for an SPI device connected to the MPSSE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpiConfig {
+    /// SPI clock polarity and phase.
+    pub mode: SpiMode,
+    /// Chip-select bit mask in the low GPIO byte. Multiple bits are allowed.
+    pub cs_mask: u8,
+    /// Whether all selected chip-select bits are active low.
+    pub cs_active_low: bool,
+    /// Whether transfers use least-significant-bit first ordering.
+    pub lsb_first: bool,
+    /// Idle levels for auxiliary low-byte GPIO pins.
+    ///
+    /// The SPI pins (bits 0-2) and the bits in `cs_mask` are composed by the
+    /// SPI implementation and override this value.
+    pub low_idle: u8,
+    /// Directions for auxiliary low-byte GPIO pins (`1` = output).
+    ///
+    /// SK and DO are always outputs, DI is always an input, and `cs_mask`
+    /// bits are always outputs.
+    pub low_dir: u8,
+    /// Idle levels for the high GPIO byte.
+    pub high_idle: u8,
+    /// Directions for the high GPIO byte (`1` = output).
+    pub high_dir: u8,
+}
+
+impl SpiConfig {
+    /// Create a mode-specific configuration using ADBUS3 as active-low CS.
+    pub const fn new(mode: SpiMode) -> Self {
+        Self {
+            mode,
+            cs_mask: 0x08,
+            cs_active_low: true,
+            lsb_first: false,
+            low_idle: 0,
+            low_dir: 0,
+            high_idle: 0,
+            high_dir: 0,
+        }
+    }
+
+    /// Select one or more low-byte GPIO bits as chip selects.
+    pub const fn with_cs_mask(mut self, cs_mask: u8, active_low: bool) -> Self {
+        self.cs_mask = cs_mask;
+        self.cs_active_low = active_low;
+        self
+    }
+
+    /// Configure the transfer bit order.
+    pub const fn with_lsb_first(mut self, lsb_first: bool) -> Self {
+        self.lsb_first = lsb_first;
+        self
+    }
+
+    /// Configure idle levels and directions for auxiliary low-byte pins.
+    pub const fn with_low_pins(mut self, idle: u8, direction: u8) -> Self {
+        self.low_idle = idle;
+        self.low_dir = direction;
+        self
+    }
+
+    /// Configure idle levels and directions for high-byte pins.
+    pub const fn with_high_pins(mut self, idle: u8, direction: u8) -> Self {
+        self.high_idle = idle;
+        self.high_dir = direction;
+        self
+    }
+}
+
+impl Default for SpiConfig {
+    fn default() -> Self {
+        Self::new(SpiMode::Mode0)
+    }
+}
+
+fn compose_low_pins(config: &SpiConfig) -> (u8, u8) {
+    let auxiliary_mask = !(0x07 | config.cs_mask);
+    let direction = 0x03 | config.cs_mask | (config.low_dir & auxiliary_mask);
+    let cs_idle = if config.cs_active_low {
+        config.cs_mask
+    } else {
+        0
+    };
+    let clock_idle = if config.mode.cpol() { 0x01 } else { 0 };
+    let idle = (config.low_idle & auxiliary_mask) | clock_idle | cs_idle;
+    (idle, direction)
+}
+
+/// Configured SPI device connected to the MPSSE.
 #[derive(Debug, Clone)]
 pub struct SpiDevice {
     /// The SPI mode (clock polarity and phase).
@@ -156,7 +245,7 @@ impl SpiDevice {
     /// - ADBUS2 (DI) = MISO input
     /// - ADBUS3 = CS# output (active low, deasserted on init)
     pub async fn new(s: &mut MpsseSession<'_>, mode: SpiMode) -> Result<Self> {
-        Self::with_cs_pin(s, mode, 0x08, true, false).await
+        Self::with_config(s, SpiConfig::new(mode)).await
     }
 
     /// Create an SPI device with a custom CS pin and options.
@@ -174,6 +263,28 @@ impl SpiDevice {
         cs_active_low: bool,
         lsb_first: bool,
     ) -> Result<Self> {
+        Self::with_config(
+            s,
+            SpiConfig::new(mode)
+                .with_cs_mask(cs_pin, cs_active_low)
+                .with_lsb_first(lsb_first),
+        )
+        .await
+    }
+
+    /// Create an SPI device with full chip-select and idle-pin configuration.
+    pub async fn with_config(s: &mut MpsseSession<'_>, config: SpiConfig) -> Result<Self> {
+        let SpiConfig {
+            mode,
+            cs_mask,
+            cs_active_low,
+            lsb_first,
+            low_idle: _,
+            low_dir: _,
+            high_idle,
+            high_dir,
+        } = config;
+
         // Build MPSSE opcodes based on mode and bit order
         let lsb = if lsb_first { mpsse::LSB } else { 0 };
 
@@ -204,13 +315,8 @@ impl SpiDevice {
             }
         };
 
-        // Direction: SK(0)=out, DO(1)=out, DI(2)=in, CS=out
-        let dir_mask = 0x03 | cs_pin; // bits 0,1 = output, plus CS pin
-
-        // Idle value: clock at idle level, CS deasserted
-        let cs_idle = if cs_active_low { cs_pin } else { 0 }; // deasserted state
-        let clk_idle = if mode.cpol() { 0x01 } else { 0x00 }; // SK at idle level
-        let idle_value = clk_idle | cs_idle;
+        // Compose the fixed SPI pins with caller-provided auxiliary GPIO state.
+        let (idle_value, dir_mask) = compose_low_pins(&config);
 
         // I2C enables three-phase clocking, which changes SPI timing. Restore
         // the SPI/JTAG clocking mode and invalidate objects created under the
@@ -223,7 +329,7 @@ impl SpiDevice {
         let spi = Self {
             mode,
             lsb_first,
-            cs_pin,
+            cs_pin: cs_mask,
             cs_active_low,
             write_cmd,
             read_cmd,
@@ -237,6 +343,9 @@ impl SpiDevice {
 
         // Set initial pin state
         s.set_gpio_low(idle_value, dir_mask).await?;
+        if high_idle != 0 || high_dir != 0 {
+            s.set_gpio_high(high_idle, high_dir).await?;
+        }
 
         Ok(spi)
     }
@@ -372,15 +481,12 @@ impl SpiDevice {
             return Ok(Vec::new());
         }
         let guard = s.dev.begin_stateful_operation()?;
-        self.cs_assert(s).await?;
-        let operation = async {
-            self.write_raw(s, tx).await?;
-            self.read_raw(s, read_len).await
+        let command = self.write_read_command(tx, read_len);
+        s.dev.write_all(&command).await?;
+        let received = read_exact(s.dev, read_len).await?;
+        if self.cs_pin != 0 {
+            s.ctx.update_gpio_low_state(self.idle_value, self.dir_mask);
         }
-        .await;
-        let cleanup = self.cs_deassert(s).await;
-        let received = operation?;
-        cleanup?;
         guard.disarm();
         Ok(received)
     }
@@ -400,12 +506,16 @@ impl SpiDevice {
         self.cs_pin
     }
 
+    /// Get the chip-select bit mask.
+    pub fn cs_mask(&self) -> u8 {
+        self.cs_pin
+    }
+
     /// Append a SET_BITS_LOW command to `cmd` that asserts CS.
     ///
     /// This is a zero-cost helper for building MPSSE command buffers without
     /// needing a mutable reference to `MpsseContext` or `FtdiDevice`.
     /// If `cs_pin` is 0 (manual CS), this is a no-op.
-    #[cfg(test)]
     fn append_cs_assert(&self, cmd: &mut Vec<u8>) {
         if self.cs_pin == 0 {
             return;
@@ -421,12 +531,31 @@ impl SpiDevice {
     /// Append a SET_BITS_LOW command to `cmd` that deasserts CS (returns to idle).
     ///
     /// If `cs_pin` is 0 (manual CS), this is a no-op.
-    #[cfg(test)]
     fn append_cs_deassert(&self, cmd: &mut Vec<u8>) {
         if self.cs_pin == 0 {
             return;
         }
         cmd.extend_from_slice(&[mpsse::SET_BITS_LOW, self.idle_value, self.dir_mask]);
+    }
+
+    fn write_read_command(&self, tx: &[u8], read_len: usize) -> Vec<u8> {
+        let write_overhead = tx.len().div_ceil(MAX_MPSSE_TRANSFER) * 3;
+        let read_overhead = read_len.div_ceil(MAX_MPSSE_IO_CHUNK) * 3;
+        let mut cmd = Vec::with_capacity(tx.len() + write_overhead + read_overhead + 7);
+
+        self.append_cs_assert(&mut cmd);
+        for chunk in tx.chunks(MAX_MPSSE_TRANSFER) {
+            let (lo, hi) = encode_len(chunk.len());
+            cmd.extend_from_slice(&[self.write_cmd, lo, hi]);
+            cmd.extend_from_slice(chunk);
+        }
+        for (_, chunk_len) in io_chunks(read_len) {
+            let (lo, hi) = encode_len(chunk_len);
+            cmd.extend_from_slice(&[self.read_cmd, lo, hi]);
+        }
+        self.append_cs_deassert(&mut cmd);
+        cmd.push(mpsse::SEND_IMMEDIATE);
+        cmd
     }
 
     // ---- Test-only accessors ----
@@ -705,6 +834,62 @@ mod tests {
         let cs_idle = cs_pin;
         let clk_idle = 0x01; // CPOL=1 -> SK=1
         assert_eq!(clk_idle | cs_idle, 0x09);
+    }
+
+    #[test]
+    fn config_composes_cs_mask_and_auxiliary_pins() {
+        let config = SpiConfig::new(SpiMode::Mode2)
+            .with_cs_mask(0x18, true)
+            .with_low_pins(0x64, 0xe4)
+            .with_high_pins(0x20, 0x70);
+
+        let (idle, direction) = compose_low_pins(&config);
+        assert_eq!(idle, 0x79); // auxiliary 0x60, CS 0x18, idle-high clock
+        assert_eq!(direction, 0xfb); // auxiliary 0xe0, CS 0x18, SK/DO outputs
+        assert_eq!(config.high_idle, 0x20);
+        assert_eq!(config.high_dir, 0x70);
+    }
+
+    #[test]
+    fn write_read_is_one_chunked_command_buffer() {
+        let spi = SpiDevice {
+            mode: SpiMode::Mode0,
+            lsb_first: false,
+            cs_pin: 0x18,
+            cs_active_low: true,
+            write_cmd: 0x11,
+            read_cmd: 0x20,
+            rw_cmd: 0x31,
+            dir_mask: 0x3b,
+            idle_value: 0x38,
+            recovery_epoch: 0,
+            protocol_epoch: 0,
+            device_id: 0,
+        };
+
+        let command = spi.write_read_command(&[0x9f], 1025);
+        assert_eq!(
+            command,
+            vec![
+                mpsse::SET_BITS_LOW,
+                0x20,
+                0x3b,
+                0x11,
+                0,
+                0,
+                0x9f,
+                0x20,
+                0xff,
+                0x03,
+                0x20,
+                0,
+                0,
+                mpsse::SET_BITS_LOW,
+                0x38,
+                0x3b,
+                mpsse::SEND_IMMEDIATE,
+            ]
+        );
     }
 
     // ---- Direction mask tests ----

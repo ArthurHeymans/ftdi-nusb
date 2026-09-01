@@ -7,7 +7,7 @@ use ftdi_nusb::mpsse::{
     gpio::{GpioBank, GpioPin},
     i2c::I2cBus,
     jtag::JtagBus,
-    spi::{SpiDevice, SpiMode},
+    spi::{SpiConfig, SpiDevice, SpiMode},
 };
 use ftdi_nusb::{FtdiDevice, Result};
 
@@ -15,8 +15,16 @@ async fn mpsse_api(dev: &mut FtdiDevice) -> Result<()> {
     let mut ctx = MpsseContext::init(dev, 1_000_000).await?;
     let mut s = ctx.session(dev)?;
 
-    let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
-    spi.write(&mut s, &[0x9f]).await?;
+    s.set_clock_divisor(6).await?;
+    let spi = SpiDevice::with_config(
+        &mut s,
+        SpiConfig::new(SpiMode::Mode0)
+            .with_cs_mask(0x18, true)
+            .with_low_pins(0x20, 0x30)
+            .with_high_pins(0, 0x70),
+    )
+    .await?;
+    spi.write_read(&mut s, &[0x9f], 3).await?;
 
     let i2c = I2cBus::new(&mut s).await?;
     i2c.write(&mut s, 0x50, &[0]).await?;
@@ -25,7 +33,9 @@ async fn mpsse_api(dev: &mut FtdiDevice) -> Result<()> {
     gpio.set_output(&mut s, true).await?;
 
     let mut jtag = JtagBus::new(&mut s).await?;
-    jtag.reset(&mut s).await
+    jtag.reset(&mut s).await?;
+
+    s.release_pins().await
 }
 
 /// A blocking device reaches the asynchronous MPSSE API through
