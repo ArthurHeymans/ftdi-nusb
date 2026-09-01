@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     println!("Opening FTDI device...");
-    let mut dev = ftdi_nusb::FtdiDevice::open(FTDI_VID, pid::FT232)?;
+    let mut dev = ftdi_nusb::blocking::FtdiDevice::open(FTDI_VID, pid::FT232)?;
     println!("Opened: {:?}", dev);
 
     dev.set_baudrate(115200)?;

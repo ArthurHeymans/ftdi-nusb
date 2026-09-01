@@ -4,7 +4,6 @@ use crate::constants::*;
 use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 use crate::types::ChipType;
-use maybe_async::maybe_async;
 
 const MAGIC: u16 = 0x55AA;
 
@@ -16,7 +15,6 @@ impl FtdiDevice {
     ///
     /// After reading, the EEPROM size is auto-detected by comparing halves
     /// of the buffer.
-    #[maybe_async]
     pub async fn read_eeprom(&mut self) -> Result<()> {
         for i in 0..(FTDI_MAX_EEPROM_SIZE / 2) {
             let data = self
@@ -57,7 +55,6 @@ impl FtdiDevice {
     /// The EEPROM must have been initialized (via `eeprom_build` or manual
     /// setup). Performs the same initialization sequence observed from FTDI's
     /// MProg tool.
-    #[maybe_async]
     pub async fn write_eeprom(&mut self) -> Result<()> {
         if !self.eeprom.initialized_for_connected_device {
             return Err(Error::Eeprom(
@@ -100,7 +97,6 @@ impl FtdiDevice {
     /// word wraparound test (93x46 vs 93x56 vs 93x66).
     ///
     /// Not supported on FT232R/FT245R (internal EEPROM) or FT230X (MTP).
-    #[maybe_async]
     pub async fn erase_eeprom(&mut self) -> Result<()> {
         let chip_type = self.chip_type();
 
@@ -139,7 +135,6 @@ impl FtdiDevice {
     }
 
     /// Read a single 16-bit EEPROM location.
-    #[maybe_async]
     pub async fn read_eeprom_location(&self, addr: u16) -> Result<u16> {
         let data = self.control_in(SIO_READ_EEPROM_REQUEST, 0, addr, 2).await?;
         if data.len() < 2 {
@@ -151,7 +146,6 @@ impl FtdiDevice {
     /// Write a single 16-bit EEPROM location.
     ///
     /// Only valid for addresses >= 0x80 on 93x66 EEPROMs.
-    #[maybe_async]
     pub async fn write_eeprom_location(&self, addr: u16, value: u16) -> Result<()> {
         if addr < 0x80 {
             return Err(Error::InvalidArgument(
@@ -165,7 +159,6 @@ impl FtdiDevice {
     /// Read the FTDIChip-ID from R-type devices.
     ///
     /// The chip ID is a unique identifier burned into the silicon.
-    #[maybe_async]
     pub async fn read_chipid(&self) -> Result<u32> {
         let a_data = self.control_in(SIO_READ_EEPROM_REQUEST, 0, 0x43, 2).await?;
         let b_data = self.control_in(SIO_READ_EEPROM_REQUEST, 0, 0x44, 2).await?;
@@ -199,7 +192,6 @@ impl FtdiDevice {
     /// For FT230X devices, this reads the factory configuration data
     /// (addresses 0x40-0x4F) from the device to include in the checksum,
     /// matching the behavior of `ftdi_eeprom_build()` in libftdi.
-    #[maybe_async]
     pub async fn eeprom_build(&mut self) -> Result<usize> {
         let chip_type = self.chip_type();
 

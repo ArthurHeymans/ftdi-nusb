@@ -18,34 +18,38 @@
 //! cargo run --example spi_flash
 //! ```
 
-use ftdi_nusb::FtdiDevice;
 use ftdi_nusb::mpsse::MpsseContext;
 use ftdi_nusb::mpsse::spi::{SpiDevice, SpiMode};
 
 fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
+    futures_lite::future::block_on(run())
+}
 
+async fn run() -> Result<(), ftdi_nusb::Error> {
     println!("Opening FT232H...");
-    let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
+    let mut dev = ftdi_nusb::blocking::FtdiDevice::open(0x0403, 0x6014)?.into_async();
     println!("Chip: {:?}", dev.chip_type());
 
     // Initialize MPSSE at 1 MHz SPI clock
-    let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
+    let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
     println!("MPSSE clock: {} Hz", mpsse.clock_hz());
 
     // Configure SPI Mode 0 with default CS on ADBUS3
-    let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0)?;
+    let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
     println!("SPI configured in Mode 0");
 
     // Read JEDEC ID (command 0x9F, returns 3 bytes)
-    let jedec = spi.transfer(&mut mpsse, &mut dev, &[0x9F, 0x00, 0x00, 0x00])?;
+    let jedec = spi
+        .transfer(&mut mpsse, &mut dev, &[0x9F, 0x00, 0x00, 0x00])
+        .await?;
     println!(
         "JEDEC ID: manufacturer=0x{:02X}, memory_type=0x{:02X}, capacity=0x{:02X}",
         jedec[1], jedec[2], jedec[3]
     );
 
     // Read Status Register 1 (command 0x05, returns 1 byte)
-    let status = spi.transfer(&mut mpsse, &mut dev, &[0x05, 0x00])?;
+    let status = spi.transfer(&mut mpsse, &mut dev, &[0x05, 0x00]).await?;
     println!("Status Register 1: 0x{:02X}", status[1]);
     println!("  WEL (Write Enable Latch): {}", (status[1] & 0x02) != 0);
     println!("  BUSY: {}", (status[1] & 0x01) != 0);
@@ -53,7 +57,7 @@ fn main() -> Result<(), ftdi_nusb::Error> {
     // Read first 16 bytes of flash (command 0x03 + 3-byte address)
     let mut read_cmd = vec![0x03, 0x00, 0x00, 0x00]; // Read from address 0
     read_cmd.extend_from_slice(&[0x00; 16]); // 16 dummy bytes for read
-    let data = spi.transfer(&mut mpsse, &mut dev, &read_cmd)?;
+    let data = spi.transfer(&mut mpsse, &mut dev, &read_cmd).await?;
     println!("Flash data at 0x000000:");
     for (i, byte) in data[4..].iter().enumerate() {
         print!("{:02X} ", byte);

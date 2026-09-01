@@ -18,32 +18,34 @@
 //! cargo run --example jtag_idcode
 //! ```
 
-use ftdi_nusb::FtdiDevice;
 use ftdi_nusb::mpsse::MpsseContext;
 use ftdi_nusb::mpsse::jtag::JtagBus;
 
 fn main() -> Result<(), ftdi_nusb::Error> {
     env_logger::init();
+    futures_lite::future::block_on(run())
+}
 
+async fn run() -> Result<(), ftdi_nusb::Error> {
     println!("Opening FT232H...");
-    let mut dev = FtdiDevice::open(0x0403, 0x6014)?;
+    let mut dev = ftdi_nusb::blocking::FtdiDevice::open(0x0403, 0x6014)?.into_async();
     println!("Chip: {:?}", dev.chip_type());
 
     // Initialize MPSSE at 1 MHz TCK
-    let mut mpsse = MpsseContext::init(&mut dev, 1_000_000)?;
+    let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
     println!("MPSSE clock: {} Hz", mpsse.clock_hz());
 
     // Configure JTAG bus
-    let mut jtag = JtagBus::new(&mut mpsse, &mut dev)?;
+    let mut jtag = JtagBus::new(&mut mpsse, &mut dev).await?;
     println!("JTAG TAP state: {:?}", jtag.state());
 
     // Reset the TAP state machine
-    jtag.reset(&mut dev)?;
+    jtag.reset(&mut dev).await?;
     println!("TAP reset -> {:?}", jtag.state());
 
     // After reset, the default DR is usually IDCODE (32 bits).
     // Navigate to Shift-DR and read 32 bits.
-    let idcode = jtag.shift_dr(&mpsse, &mut dev, &[0; 4], 32)?;
+    let idcode = jtag.shift_dr(&mpsse, &mut dev, &[0; 4], 32).await?;
     println!("TAP state after shift: {:?}", jtag.state());
 
     // Parse IDCODE fields (IEEE 1149.1)
@@ -61,8 +63,8 @@ fn main() -> Result<(), ftdi_nusb::Error> {
 
     // Scan the chain for multiple devices
     println!("\nScanning chain (up to 8 devices)...");
-    jtag.reset(&mut dev)?;
-    let chain = jtag.shift_dr(&mpsse, &mut dev, &[0; 32], 256)?;
+    jtag.reset(&mut dev).await?;
+    let chain = jtag.shift_dr(&mpsse, &mut dev, &[0; 32], 256).await?;
 
     for i in 0..8 {
         let offset = i * 4;

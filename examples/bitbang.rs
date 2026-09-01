@@ -8,8 +8,9 @@
 use std::thread;
 use std::time::Duration;
 
+use ftdi_nusb::BitMode;
+use ftdi_nusb::blocking::FtdiDevice;
 use ftdi_nusb::constants::{FTDI_VID, pid};
-use ftdi_nusb::{BitMode, FtdiDevice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();

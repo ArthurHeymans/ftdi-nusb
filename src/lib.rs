@@ -7,8 +7,11 @@
 //!
 //! # Quick Start
 //!
+//! [`FtdiDevice`] is asynchronous. Native applications that do not use an
+//! async runtime can open a [`blocking::FtdiDevice`] instead:
+//!
 //! ```no_run
-//! use ftdi_nusb::{FtdiDevice, constants::FTDI_VID, constants::pid};
+//! use ftdi_nusb::{blocking::FtdiDevice, constants::FTDI_VID, constants::pid};
 //!
 //! // Open the first FT232R connected
 //! let mut dev = FtdiDevice::open(FTDI_VID, pid::FT232)?;
@@ -25,38 +28,30 @@
 //!   SPI/I2C/JTAG.
 //! - **High-level MPSSE**: SPI master and I2C master with typed APIs
 //!   ([`mpsse::spi`], [`mpsse::i2c`]).
-//! - **Async transfers**: Submit non-blocking USB reads/writes and wait
-//!   for completion later ([`async_transfer`]).
 //! - **EEPROM**: Read, write, erase, decode, and build EEPROM images with
 //!   chip-aware defaults.
 //! - **Streaming**: High-throughput continuous reads via concurrent USB
 //!   transfers (FT2232H / FT232H).
-//! - **`Read` / `Write` traits**: Use `FtdiDevice` anywhere `std::io::Read`
-//!   or `std::io::Write` is expected.
+//! - **`Read` / `Write` traits**: Use [`blocking::FtdiDevice`] anywhere
+//!   `std::io::Read` or `std::io::Write` is expected.
 
 // Always available (pure computation)
 mod baudrate;
 pub mod constants;
 
-/// Internal platform-aware sleep helper.
+/// Internal asynchronous platform-aware sleep helper.
 ///
-/// In sync mode, uses `std::thread::sleep`. In WASM async mode, uses
-/// `setTimeout` via a JS Promise. Works in both Window and Worker contexts.
+/// Uses a native timer future or `setTimeout` via a JS Promise on WASM.
 pub(crate) mod sleep_util {
     use core::time::Duration;
 
     /// Sleep for the given duration.
     ///
-    /// - Native targets block the thread with `std::thread::sleep`.
+    /// - Native targets yield via a timer future.
     /// - WASM targets yield via a `setTimeout` Promise.
-    #[maybe_async::maybe_async]
     pub(crate) async fn sleep(duration: Duration) {
-        let _ = duration;
-
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::sleep(duration);
-        }
+        futures_timer::Delay::new(duration).await;
 
         #[cfg(target_arch = "wasm32")]
         {
@@ -85,6 +80,8 @@ pub(crate) mod sleep_util {
         }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blocking;
 pub mod context;
 pub mod eeprom;
 pub mod error;
@@ -92,8 +89,6 @@ pub mod mpsse;
 pub mod types;
 
 // Native-only modules
-#[cfg(not(target_arch = "wasm32"))]
-pub mod async_transfer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod device_info;
 #[cfg(all(feature = "embedded-hal", not(target_arch = "wasm32")))]
@@ -110,8 +105,6 @@ pub use error::{Error, Result};
 pub use types::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use async_transfer::{ReadTransferControl, WriteTransferControl};
-#[cfg(not(target_arch = "wasm32"))]
 pub use device_info::{DeviceFilter, find_device, find_devices};
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream::StreamProgress;
+pub use stream::{FtdiStream, StreamEvent, StreamProgress};
