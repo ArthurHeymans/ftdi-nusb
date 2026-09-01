@@ -50,6 +50,10 @@ dev.write_all(b"Hello from Rust!\r\n")?;
 MPSSE and streaming are asynchronous APIs. A blocking application reaches them
 through `dev.as_async_mut()` and a `block_on` of its choice (see the examples).
 
+All MPSSE I/O goes through an `MpsseSession`, which pairs the context with a
+mutable borrow of the device it was initialized on. This makes it impossible
+to accidentally drive one device with another device's MPSSE state.
+
 ### SPI
 
 ```rust,no_run
@@ -57,10 +61,11 @@ use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, spi::{SpiDevice, SpiMode}}};
 
 # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
-let spi = SpiDevice::new(&mut mpsse, dev, SpiMode::Mode0).await?;
+let mut s = mpsse.session(dev)?;
+let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
 
 // Read JEDEC ID from SPI flash
-let id = spi.transfer(&mut mpsse, dev, &[0x9F, 0, 0, 0]).await?;
+let id = spi.transfer(&mut s, &[0x9F, 0, 0, 0]).await?;
 # Ok(())
 # }
 ```
@@ -72,10 +77,11 @@ use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, i2c::I2cBus}};
 
 # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 let mut mpsse = MpsseContext::init(dev, 100_000).await?; // 100 kHz
-let i2c = I2cBus::new(&mut mpsse, dev).await?;
+let mut s = mpsse.session(dev)?;
+let i2c = I2cBus::new(&mut s).await?;
 
 // Write register address, read 2 bytes from I2C device at 0x48
-let data = i2c.write_read(&mut mpsse, dev, 0x48, &[0x00], 2).await?;
+let data = i2c.write_read(&mut s, 0x48, &[0x00], 2).await?;
 # Ok(())
 # }
 ```
@@ -87,11 +93,12 @@ use ftdi_nusb::{FtdiDevice, mpsse::{MpsseContext, jtag::JtagBus}};
 
 # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 let mut mpsse = MpsseContext::init(dev, 1_000_000).await?;
-let mut jtag = JtagBus::new(&mut mpsse, dev).await?;
+let mut s = mpsse.session(dev)?;
+let mut jtag = JtagBus::new(&mut s).await?;
 
 // Reset TAP and read IDCODE
-jtag.reset(dev).await?;
-let idcode = jtag.shift_dr(&mpsse, dev, &[0; 4], 32).await?;
+jtag.reset(&mut s).await?;
+let idcode = jtag.shift_dr(&mut s, &[0; 4], 32).await?;
 # Ok(())
 # }
 ```

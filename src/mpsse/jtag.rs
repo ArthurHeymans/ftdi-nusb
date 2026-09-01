@@ -34,24 +34,24 @@
 //!
 //! # async fn example(dev: &mut FtdiDevice) -> ftdi_nusb::Result<()> {
 //! let mut mpsse = MpsseContext::init(dev, 1_000_000).await?; // 1 MHz TCK
-//! let mut jtag = JtagBus::new(&mut mpsse, dev).await?;
+//! let mut s = mpsse.session(dev)?;
+//! let mut jtag = JtagBus::new(&mut s).await?;
 //!
 //! // Reset TAP to known state
-//! jtag.reset(dev).await?;
+//! jtag.reset(&mut s).await?;
 //!
 //! // Read IDCODE (first DR after reset is IDCODE on most devices)
-//! jtag.goto_shift_dr(dev).await?;
-//! let idcode = jtag.shift_bits(&mpsse, dev, &[0; 4], 32, true).await?;
-//! jtag.goto_idle(dev).await?;
+//! jtag.goto_shift_dr(&mut s).await?;
+//! let idcode = jtag.shift_bits(&mut s, &[0; 4], 32, true).await?;
+//! jtag.goto_idle(&mut s).await?;
 //! # Ok(())
 //! # }
 //! ```
 
 use crate::constants::mpsse;
-use crate::context::FtdiDevice;
 use crate::error::{Error, Result};
 
-use super::{MpsseContext, read_exact};
+use super::{MpsseSession, read_exact};
 
 /// JTAG TAP state (simplified — not all states tracked).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,11 +93,16 @@ pub struct JtagBus {
     /// Current tracked TAP state.
     state: TapState,
     recovery_epoch: u64,
+    protocol_epoch: u64,
+    device_id: u64,
 }
 
 impl JtagBus {
-    fn ensure_current(&self, dev: &FtdiDevice) -> Result<()> {
-        if self.recovery_epoch == dev.recovery_epoch() {
+    fn ensure_current(&self, s: &MpsseSession<'_>) -> Result<()> {
+        if self.device_id == s.dev.device_id()
+            && self.recovery_epoch == s.dev.recovery_epoch()
+            && self.protocol_epoch == s.protocol_epoch()
+        {
             Ok(())
         } else {
             Err(Error::InvalidMpsseContext)
@@ -114,20 +119,28 @@ impl JtagBus {
     ///
     /// TCK and TMS are driven low initially. The TAP state is set to Unknown;
     /// call [`reset`](Self::reset) to bring it to a known state.
-    pub async fn new(ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<Self> {
+    pub async fn new(s: &mut MpsseSession<'_>) -> Result<Self> {
         let tms_pin = 0x08; // ADBUS3
 
         // Direction: TCK(0)=out, TDI(1)=out, TDO(2)=in, TMS(3)=out
         let dir_mask = 0x0B; // bits 0,1,3 = output
 
+        // I2C enables three-phase clocking, which is not valid for JTAG.
+        if s.ctx().is_h_type() {
+            s.write_commands(&[mpsse::DIS_3_PHASE]).await?;
+        }
+        let protocol_epoch = s.bump_protocol_epoch();
+
         // Initial state: TCK=0, TDI=0, TMS=0
-        ctx.set_gpio_low(dev, 0x00, dir_mask).await?;
+        s.set_gpio_low(0x00, dir_mask).await?;
 
         Ok(Self {
             tms_pin,
             dir_mask,
             state: TapState::Unknown,
-            recovery_epoch: dev.recovery_epoch(),
+            recovery_epoch: s.dev.recovery_epoch(),
+            protocol_epoch,
+            device_id: s.dev.device_id(),
         })
     }
 
@@ -140,9 +153,9 @@ impl JtagBus {
     ///
     /// This forces the TAP into Test-Logic-Reset regardless of its
     /// current state. Then clocks once with TMS=0 to enter Run-Test/Idle.
-    pub async fn reset(&mut self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
+    pub async fn reset(&mut self, s: &mut MpsseSession<'_>) -> Result<()> {
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
         // WRITE_TMS: clock TMS bits out. The MPSSE command is:
         //   0x4B length_minus_1 data_byte
         // where data bits are clocked LSB first on TMS, TDI is held at bit 7.
@@ -159,7 +172,7 @@ impl JtagBus {
         cmd.push(0); // 1 bit
         cmd.push(0x00); // TMS=0
 
-        dev.write_all(&cmd).await?;
+        s.dev.write_all(&cmd).await?;
         self.state = TapState::Idle;
         guard.disarm();
         Ok(())
@@ -168,16 +181,16 @@ impl JtagBus {
     /// Navigate from Run-Test/Idle to Shift-DR.
     ///
     /// TMS sequence: 1, 0, 0 (Select-DR-Scan -> Capture-DR -> Shift-DR).
-    pub async fn goto_shift_dr(&mut self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
+    pub async fn goto_shift_dr(&mut self, s: &mut MpsseSession<'_>) -> Result<()> {
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
         // 3 bits: TMS = 1,0,0 -> LSB first = 0b001 = 0x01
         cmd.push(mpsse::WRITE_TMS | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB);
         cmd.push(2); // 3 bits
         cmd.push(0x01); // TMS: bit0=1, bit1=0, bit2=0
 
-        dev.write_all(&cmd).await?;
+        s.dev.write_all(&cmd).await?;
         self.state = TapState::ShiftDr;
         guard.disarm();
         Ok(())
@@ -187,16 +200,16 @@ impl JtagBus {
     ///
     /// TMS sequence: 1, 1, 0, 0 (Select-DR-Scan -> Select-IR-Scan ->
     /// Capture-IR -> Shift-IR).
-    pub async fn goto_shift_ir(&mut self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
+    pub async fn goto_shift_ir(&mut self, s: &mut MpsseSession<'_>) -> Result<()> {
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
         // 4 bits: TMS = 1,1,0,0 -> LSB first = 0b0011 = 0x03
         cmd.push(mpsse::WRITE_TMS | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB);
         cmd.push(3); // 4 bits
         cmd.push(0x03); // TMS: bit0=1, bit1=1, bit2=0, bit3=0
 
-        dev.write_all(&cmd).await?;
+        s.dev.write_all(&cmd).await?;
         self.state = TapState::ShiftIr;
         guard.disarm();
         Ok(())
@@ -205,16 +218,16 @@ impl JtagBus {
     /// Navigate from Exit1-DR/Exit1-IR to Run-Test/Idle.
     ///
     /// TMS sequence: 1, 0 (Update-DR/IR -> Run-Test/Idle).
-    pub async fn goto_idle(&mut self, dev: &mut FtdiDevice) -> Result<()> {
-        self.ensure_current(dev)?;
-        let guard = dev.begin_stateful_operation()?;
+    pub async fn goto_idle(&mut self, s: &mut MpsseSession<'_>) -> Result<()> {
+        self.ensure_current(s)?;
+        let guard = s.dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(4);
         // 2 bits: TMS = 1,0 -> LSB first = 0b01 = 0x01
         cmd.push(mpsse::WRITE_TMS | mpsse::WRITE_NEG | mpsse::BITMODE | mpsse::LSB);
         cmd.push(1); // 2 bits
         cmd.push(0x01); // TMS: bit0=1, bit1=0
 
-        dev.write_all(&cmd).await?;
+        s.dev.write_all(&cmd).await?;
         self.state = TapState::Idle;
         guard.disarm();
         Ok(())
@@ -224,13 +237,13 @@ impl JtagBus {
     ///
     /// Useful for devices that require a certain number of TCK cycles
     /// in Run-Test/Idle for internal processing.
-    pub async fn idle_clocks(&self, dev: &mut FtdiDevice, count: u32) -> Result<()> {
-        self.ensure_current(dev)?;
+    pub async fn idle_clocks(&self, s: &mut MpsseSession<'_>, count: u32) -> Result<()> {
+        self.ensure_current(s)?;
         if count == 0 {
             return Ok(());
         }
 
-        let guard = dev.begin_stateful_operation()?;
+        let guard = s.dev.begin_stateful_operation()?;
         let mut cmd = Vec::new();
 
         // Use CLK_BITS for small counts, CLK_BYTES for larger
@@ -249,7 +262,7 @@ impl JtagBus {
             }
         }
 
-        dev.write_all(&cmd).await?;
+        s.dev.write_all(&cmd).await?;
         guard.disarm();
         Ok(())
     }
@@ -274,19 +287,17 @@ impl JtagBus {
     /// bits are valid (LSB first within each byte).
     pub async fn shift_bits(
         &mut self,
-        ctx: &MpsseContext,
-        dev: &mut FtdiDevice,
+        s: &mut MpsseSession<'_>,
         tdi_data: &[u8],
         bit_count: usize,
         exit_shift: bool,
     ) -> Result<Vec<u8>> {
-        self.ensure_current(dev)?;
-        ctx.ensure_current(dev)?;
+        self.ensure_current(s)?;
         if bit_count == 0 {
             return Ok(Vec::new());
         }
 
-        let guard = dev.begin_stateful_operation()?;
+        let guard = s.dev.begin_stateful_operation()?;
         let byte_count = bit_count.div_ceil(8);
         let mut tdi = vec![0u8; byte_count];
         let copy_len = tdi_data.len().min(byte_count);
@@ -316,8 +327,8 @@ impl JtagBus {
             cmd.extend_from_slice(&[rw_cmd, len_field as u8, (len_field >> 8) as u8]);
             cmd.extend_from_slice(&tdi[offset..offset + chunk]);
             cmd.push(mpsse::SEND_IMMEDIATE);
-            dev.write_all(&cmd).await?;
-            let response = read_exact(dev, chunk).await?;
+            s.dev.write_all(&cmd).await?;
+            let response = read_exact(s.dev, chunk).await?;
             tdo[offset..offset + chunk].copy_from_slice(&response);
         }
 
@@ -342,9 +353,9 @@ impl JtagBus {
 
         if !tail_cmd.is_empty() {
             tail_cmd.push(mpsse::SEND_IMMEDIATE);
-            dev.write_all(&tail_cmd).await?;
+            s.dev.write_all(&tail_cmd).await?;
             let expected = usize::from(remaining_bits > 0) + usize::from(exit_shift);
-            let response = read_exact(dev, expected).await?;
+            let response = read_exact(s.dev, expected).await?;
             let mut response_index = 0;
             let mut tdo_bit = full_bytes * 8;
 
@@ -374,14 +385,13 @@ impl JtagBus {
     /// exits, and returns to Idle.
     pub async fn write_ir(
         &mut self,
-        ctx: &MpsseContext,
-        dev: &mut FtdiDevice,
+        s: &mut MpsseSession<'_>,
         ir_data: &[u8],
         ir_len: usize,
     ) -> Result<Vec<u8>> {
-        self.goto_shift_ir(dev).await?;
-        let tdo = self.shift_bits(ctx, dev, ir_data, ir_len, true).await?;
-        self.goto_idle(dev).await?;
+        self.goto_shift_ir(s).await?;
+        let tdo = self.shift_bits(s, ir_data, ir_len, true).await?;
+        self.goto_idle(s).await?;
         Ok(tdo)
     }
 
@@ -391,14 +401,13 @@ impl JtagBus {
     /// exits, and returns to Idle.
     pub async fn shift_dr(
         &mut self,
-        ctx: &MpsseContext,
-        dev: &mut FtdiDevice,
+        s: &mut MpsseSession<'_>,
         dr_data: &[u8],
         dr_len: usize,
     ) -> Result<Vec<u8>> {
-        self.goto_shift_dr(dev).await?;
-        let tdo = self.shift_bits(ctx, dev, dr_data, dr_len, true).await?;
-        self.goto_idle(dev).await?;
+        self.goto_shift_dr(s).await?;
+        let tdo = self.shift_bits(s, dr_data, dr_len, true).await?;
+        self.goto_idle(s).await?;
         Ok(tdo)
     }
 
@@ -433,6 +442,8 @@ mod tests {
             dir_mask: 0x0B,
             state: TapState::Unknown,
             recovery_epoch: 0,
+            protocol_epoch: 0,
+            device_id: 0,
         };
         assert_eq!(bus.state(), TapState::Unknown);
     }
@@ -487,6 +498,8 @@ mod tests {
             dir_mask: 0x0B,
             state: TapState::Unknown,
             recovery_epoch: 0,
+            protocol_epoch: 0,
+            device_id: 0,
         };
         // TCK=bit0, TDI=bit1, TDO=bit2 (input), TMS=bit3
         assert_eq!(bus.tms_pin(), 0x08);

@@ -35,17 +35,19 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
     let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
     println!("MPSSE clock: {} Hz", mpsse.clock_hz());
 
+    let mut s = mpsse.session(&mut dev)?;
+
     // Configure JTAG bus
-    let mut jtag = JtagBus::new(&mut mpsse, &mut dev).await?;
+    let mut jtag = JtagBus::new(&mut s).await?;
     println!("JTAG TAP state: {:?}", jtag.state());
 
     // Reset the TAP state machine
-    jtag.reset(&mut dev).await?;
+    jtag.reset(&mut s).await?;
     println!("TAP reset -> {:?}", jtag.state());
 
     // After reset, the default DR is usually IDCODE (32 bits).
     // Navigate to Shift-DR and read 32 bits.
-    let idcode = jtag.shift_dr(&mpsse, &mut dev, &[0; 4], 32).await?;
+    let idcode = jtag.shift_dr(&mut s, &[0; 4], 32).await?;
     println!("TAP state after shift: {:?}", jtag.state());
 
     // Parse IDCODE fields (IEEE 1149.1)
@@ -63,8 +65,8 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
 
     // Scan the chain for multiple devices
     println!("\nScanning chain (up to 8 devices)...");
-    jtag.reset(&mut dev).await?;
-    let chain = jtag.shift_dr(&mpsse, &mut dev, &[0; 32], 256).await?;
+    jtag.reset(&mut s).await?;
+    let chain = jtag.shift_dr(&mut s, &[0; 32], 256).await?;
 
     for i in 0..8 {
         let offset = i * 4;

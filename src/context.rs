@@ -24,14 +24,14 @@ const DEFAULT_CHUNKSIZE: usize = 4096;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy)]
-enum TransferDeadline {
+pub(crate) enum TransferDeadline {
     At(std::time::Instant),
     Never,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl TransferDeadline {
-    fn new(timeout: Duration) -> Self {
+    pub(crate) fn new(timeout: Duration) -> Self {
         std::time::Instant::now()
             .checked_add(timeout)
             .map_or(Self::Never, Self::At)
@@ -40,17 +40,17 @@ impl TransferDeadline {
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy)]
-struct TransferDeadline;
+pub(crate) struct TransferDeadline;
 
 #[cfg(target_arch = "wasm32")]
 impl TransferDeadline {
-    fn new(_: Duration) -> Self {
+    pub(crate) fn new(_: Duration) -> Self {
         Self
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn next_before_deadline<EpType, Dir>(
+pub(crate) async fn next_before_deadline<EpType, Dir>(
     endpoint: &mut nusb::Endpoint<EpType, Dir>,
     deadline: TransferDeadline,
 ) -> Option<nusb::transfer::Completion>
@@ -79,14 +79,7 @@ where
     EpType: nusb::transfer::BulkOrInterrupt,
     Dir: nusb::transfer::EndpointDirection,
 {
-    #[cfg(target_arch = "wasm32")]
-    let _ = deadline;
-
     while endpoint.pending() > 0 {
-        #[cfg(target_arch = "wasm32")]
-        endpoint.next_complete().await;
-
-        #[cfg(not(target_arch = "wasm32"))]
         if next_before_deadline(endpoint, deadline).await.is_none() {
             endpoint.cancel_all();
             return false;
@@ -94,6 +87,25 @@ where
     }
 
     true
+}
+
+/// Cancel all queued transfers on an endpoint and drain their completions
+/// within `timeout`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn cancel_and_drain<EpType, Dir>(
+    endpoint: &mut nusb::Endpoint<EpType, Dir>,
+    timeout: Duration,
+) -> Result<()>
+where
+    EpType: nusb::transfer::BulkOrInterrupt,
+    Dir: nusb::transfer::EndpointDirection,
+{
+    endpoint.cancel_all();
+    if clear_pending_transfers(endpoint, TransferDeadline::new(timeout)).await {
+        Ok(())
+    } else {
+        Err(Error::Timeout(timeout))
+    }
 }
 
 async fn wait_for_completion<EpType, Dir>(
@@ -133,6 +145,12 @@ pub(crate) enum RecoveryAction {
     None,
     RewriteEeprom,
     EraseEeprom,
+}
+
+/// Allocate a process-unique device identity.
+fn next_device_id() -> u64 {
+    static NEXT_DEVICE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    NEXT_DEVICE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Marks a device as requiring recovery if a stateful future is dropped or
@@ -222,6 +240,9 @@ pub struct FtdiDevice {
     recovery_required: Arc<AtomicBool>,
     recovery_epoch: u64,
     recovery_action: RecoveryAction,
+    // Unique per opened device; binds MPSSE contexts to the device they were
+    // initialized on.
+    device_id: u64,
 }
 
 impl core::fmt::Debug for FtdiDevice {
@@ -285,6 +306,7 @@ impl FtdiDevice {
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
             recovery_action: RecoveryAction::None,
+            device_id: next_device_id(),
         })
     }
 
@@ -440,6 +462,7 @@ impl FtdiDevice {
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
             recovery_action: RecoveryAction::None,
+            device_id: next_device_id(),
         };
 
         // Reset device
@@ -562,6 +585,7 @@ impl FtdiDevice {
             recovery_required: Arc::new(AtomicBool::new(false)),
             recovery_epoch: 0,
             recovery_action: RecoveryAction::None,
+            device_id: next_device_id(),
         };
 
         // Reset device.
@@ -639,6 +663,15 @@ impl FtdiDevice {
 
     pub(crate) fn recovery_epoch(&self) -> u64 {
         self.recovery_epoch
+    }
+
+    pub(crate) fn device_id(&self) -> u64 {
+        self.device_id
+    }
+
+    /// Invalidate every MPSSE context and bus object created before now.
+    pub(crate) fn bump_recovery_epoch(&mut self) {
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -725,6 +758,7 @@ impl FtdiDevice {
             .await?;
         self.readbuffer_offset = 0;
         self.readbuffer_remaining = 0;
+        self.bump_recovery_epoch();
         Ok(())
     }
 
@@ -740,13 +774,7 @@ impl FtdiDevice {
         // A cancelled/timed-out read may still own an endpoint transfer. Drain
         // it before purging so pre-flush bytes cannot be resumed afterward.
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let deadline = TransferDeadline::new(self.read_timeout);
-            self.read_endpoint.cancel_all();
-            if !clear_pending_transfers(&mut self.read_endpoint, deadline).await {
-                return Err(Error::Timeout(self.read_timeout));
-            }
-        }
+        cancel_and_drain(&mut self.read_endpoint, self.read_timeout).await?;
         #[cfg(target_arch = "wasm32")]
         while self.read_endpoint.pending() > 0 {
             // WebUSB has no cancellation API. FTDI IN transfers still finish
@@ -1045,6 +1073,7 @@ impl FtdiDevice {
 
         self.bitbang_mode = mode;
         self.bitbang_enabled = mode != BitMode::Reset;
+        self.bump_recovery_epoch();
         Ok(())
     }
 
@@ -1276,6 +1305,19 @@ fn read_transfer_size(
     (transfer_size <= u32::MAX as usize).then_some(transfer_size)
 }
 
+/// Like [`strip_modem_status`], but collect the payload into a new `Vec`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn strip_modem_status_to_vec(data: &[u8], packet_size: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(data.len().saturating_sub(2));
+    for packet_start in (0..data.len()).step_by(packet_size) {
+        let packet_end = (packet_start + packet_size).min(data.len());
+        if packet_end - packet_start > 2 {
+            payload.extend_from_slice(&data[packet_start + 2..packet_end]);
+        }
+    }
+    payload
+}
+
 /// Strip the 2-byte modem status header from each packet in a raw USB bulk
 /// read result. Returns the total number of payload bytes after stripping.
 fn strip_modem_status(data: &mut [u8], packet_size: usize) -> usize {
@@ -1417,17 +1459,8 @@ impl FtdiDevice {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let read_deadline = TransferDeadline::new(self.read_timeout);
-            self.read_endpoint.cancel_all();
-            if !clear_pending_transfers(&mut self.read_endpoint, read_deadline).await {
-                return Err(Error::Timeout(self.read_timeout));
-            }
-
-            let write_deadline = TransferDeadline::new(self.write_timeout);
-            self.write_endpoint.cancel_all();
-            if !clear_pending_transfers(&mut self.write_endpoint, write_deadline).await {
-                return Err(Error::Timeout(self.write_timeout));
-            }
+            cancel_and_drain(&mut self.read_endpoint, self.read_timeout).await?;
+            cancel_and_drain(&mut self.write_endpoint, self.write_timeout).await?;
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1461,7 +1494,7 @@ impl FtdiDevice {
         if restore_bitbang {
             self.set_bitmode(0xFF, bitbang_mode).await?;
         }
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        self.bump_recovery_epoch();
         self.recovery_required.store(false, Ordering::Release);
         recovery_guard.disarm();
         Ok(())

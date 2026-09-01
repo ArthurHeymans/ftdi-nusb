@@ -35,21 +35,21 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
     let mut mpsse = MpsseContext::init(&mut dev, 1_000_000).await?;
     println!("MPSSE clock: {} Hz", mpsse.clock_hz());
 
+    let mut s = mpsse.session(&mut dev)?;
+
     // Configure SPI Mode 0 with default CS on ADBUS3
-    let spi = SpiDevice::new(&mut mpsse, &mut dev, SpiMode::Mode0).await?;
+    let spi = SpiDevice::new(&mut s, SpiMode::Mode0).await?;
     println!("SPI configured in Mode 0");
 
     // Read JEDEC ID (command 0x9F, returns 3 bytes)
-    let jedec = spi
-        .transfer(&mut mpsse, &mut dev, &[0x9F, 0x00, 0x00, 0x00])
-        .await?;
+    let jedec = spi.transfer(&mut s, &[0x9F, 0x00, 0x00, 0x00]).await?;
     println!(
         "JEDEC ID: manufacturer=0x{:02X}, memory_type=0x{:02X}, capacity=0x{:02X}",
         jedec[1], jedec[2], jedec[3]
     );
 
     // Read Status Register 1 (command 0x05, returns 1 byte)
-    let status = spi.transfer(&mut mpsse, &mut dev, &[0x05, 0x00]).await?;
+    let status = spi.transfer(&mut s, &[0x05, 0x00]).await?;
     println!("Status Register 1: 0x{:02X}", status[1]);
     println!("  WEL (Write Enable Latch): {}", (status[1] & 0x02) != 0);
     println!("  BUSY: {}", (status[1] & 0x01) != 0);
@@ -57,7 +57,7 @@ async fn run() -> Result<(), ftdi_nusb::Error> {
     // Read first 16 bytes of flash (command 0x03 + 3-byte address)
     let mut read_cmd = vec![0x03, 0x00, 0x00, 0x00]; // Read from address 0
     read_cmd.extend_from_slice(&[0x00; 16]); // 16 dummy bytes for read
-    let data = spi.transfer(&mut mpsse, &mut dev, &read_cmd).await?;
+    let data = spi.transfer(&mut s, &read_cmd).await?;
     println!("Flash data at 0x000000:");
     for (i, byte) in data[4..].iter().enumerate() {
         print!("{:02X} ", byte);
