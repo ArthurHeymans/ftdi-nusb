@@ -34,10 +34,10 @@
 //! ```
 
 use crate::constants::mpsse;
-use crate::context::FtdiDevice;
+use crate::context::{FtdiDevice, RecoveryGuard};
 use crate::error::{Error, Result};
 
-use super::MpsseContext;
+use super::{MpsseContext, read_exact};
 
 /// I2C bus instance using MPSSE.
 ///
@@ -57,6 +57,7 @@ pub struct I2cBus {
     extra_dir: u8,
     /// Additional GPIO value bits to preserve (bits 3-7).
     extra_val: u8,
+    recovery_epoch: u64,
 }
 
 /// I2C error type.
@@ -77,7 +78,33 @@ impl core::fmt::Display for I2cError {
     }
 }
 
+fn finish_transaction<T>(
+    guard: RecoveryGuard,
+    operation: Result<T>,
+    cleanup: Result<()>,
+) -> Result<T> {
+    match (operation, cleanup) {
+        (Ok(result), Ok(())) => {
+            guard.disarm();
+            Ok(result)
+        }
+        (Err(error @ Error::I2cNack(_)), Ok(())) => {
+            guard.disarm();
+            Err(error)
+        }
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 impl I2cBus {
+    fn ensure_current(&self, dev: &FtdiDevice) -> Result<()> {
+        if self.recovery_epoch == dev.recovery_epoch() {
+            Ok(())
+        } else {
+            Err(Error::InvalidMpsseContext)
+        }
+    }
+
     /// Initialize I2C mode on the MPSSE.
     ///
     /// Enables 3-phase data clocking and configures pins for I2C operation.
@@ -104,6 +131,7 @@ impl I2cBus {
             dir_sda_in: 0x01 | extra_dir,  // SK=out, DO=in (release SDA)
             extra_dir,
             extra_val,
+            recovery_epoch: dev.recovery_epoch(),
         };
 
         // Set initial state: SCL=high, SDA=high (idle)
@@ -120,6 +148,9 @@ impl I2cBus {
     ///
     /// SDA goes low while SCL is high.
     pub async fn start(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+        self.ensure_current(dev)?;
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let high = 0x03 | self.extra_val; // SCL=1, SDA=1
         let sda_low = 0x01 | self.extra_val; // SCL=1, SDA=0
         let both_low = self.extra_val; // SCL=0, SDA=0
@@ -144,6 +175,7 @@ impl I2cBus {
 
         // Keep tracked GPIO state in sync with the final SET_BITS_LOW we sent
         ctx.update_gpio_low_state(both_low, self.dir_sda_out);
+        guard.disarm();
         Ok(())
     }
 
@@ -151,6 +183,9 @@ impl I2cBus {
     ///
     /// SDA goes high while SCL is high.
     pub async fn stop(&self, ctx: &mut MpsseContext, dev: &mut FtdiDevice) -> Result<()> {
+        self.ensure_current(dev)?;
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let both_low = self.extra_val; // SCL=0, SDA=0
         let scl_high = 0x01 | self.extra_val; // SCL=1, SDA=0
         let both_high = 0x03 | self.extra_val; // SCL=1, SDA=1
@@ -176,6 +211,7 @@ impl I2cBus {
 
         // Keep tracked GPIO state in sync with the final SET_BITS_LOW (idle state)
         ctx.update_gpio_low_state(both_high, self.dir_sda_out);
+        guard.disarm();
         Ok(())
     }
 
@@ -183,6 +219,8 @@ impl I2cBus {
     ///
     /// Returns `true` if ACK (SDA=0) was received, `false` for NACK.
     pub async fn write_byte(&self, dev: &mut FtdiDevice, byte: u8) -> Result<bool> {
+        self.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(20);
 
         // Set SDA as output for writing
@@ -212,22 +250,12 @@ impl I2cBus {
 
         dev.write_all(&cmd).await?;
 
-        // Read the ACK bit
-        let mut buf = [0u8; 1];
-        let mut attempts = 0;
-        let mut offset = 0;
-        while offset < 1 && attempts < 10 {
-            let n = dev.read_data(&mut buf[offset..]).await?;
-            offset += n;
-            attempts += 1;
-        }
-
-        if offset == 0 {
-            return Err(Error::DeviceUnavailable);
-        }
+        // Read the ACK bit.
+        let buf = read_exact(dev, 1).await?;
 
         // ACK bit is in bit 7 of the byte (MSB first read)
         let ack = (buf[0] & 0x01) == 0;
+        guard.disarm();
         Ok(ack)
     }
 
@@ -236,6 +264,8 @@ impl I2cBus {
     /// Set `ack` to `true` to acknowledge (continue reading) or `false`
     /// to NACK (signal end of read).
     pub async fn read_byte(&self, dev: &mut FtdiDevice, ack: bool) -> Result<u8> {
+        self.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
         let mut cmd = Vec::with_capacity(20);
 
         // Release SDA for reading
@@ -260,21 +290,10 @@ impl I2cBus {
 
         dev.write_all(&cmd).await?;
 
-        // Read the byte
-        let mut buf = [0u8; 1];
-        let mut attempts = 0;
-        let mut offset = 0;
-        while offset < 1 && attempts < 10 {
-            let n = dev.read_data(&mut buf[offset..]).await?;
-            offset += n;
-            attempts += 1;
-        }
-
-        if offset == 0 {
-            return Err(Error::DeviceUnavailable);
-        }
-
-        Ok(buf[0])
+        // Read the byte.
+        let byte = read_exact(dev, 1).await?[0];
+        guard.disarm();
+        Ok(byte)
     }
 
     /// Write data to an I2C slave device.
@@ -293,23 +312,31 @@ impl I2cBus {
                 "I2C address must be 7-bit (0x00-0x7F)",
             ));
         }
-        self.start(ctx, dev).await?;
-
-        // Address byte with write bit (bit 0 = 0)
-        let addr_byte = (address << 1) & 0xFE;
-        if !self.write_byte(dev, addr_byte).await? {
-            self.stop(ctx, dev).await?;
-            return Err(Error::I2cNack("address not acknowledged"));
+        self.ensure_current(dev)?;
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
+        if let Err(error) = self.start(ctx, dev).await {
+            dev.prepare_stateful_cleanup();
+            let _ = self.stop(ctx, dev).await;
+            return Err(error);
         }
 
-        for &byte in data {
-            if !self.write_byte(dev, byte).await? {
-                self.stop(ctx, dev).await?;
-                return Err(Error::I2cNack("data byte not acknowledged"));
+        let operation = async {
+            let addr_byte = (address << 1) & 0xFE;
+            if !self.write_byte(dev, addr_byte).await? {
+                return Err(Error::I2cNack("address not acknowledged"));
             }
+            for &byte in data {
+                if !self.write_byte(dev, byte).await? {
+                    return Err(Error::I2cNack("data byte not acknowledged"));
+                }
+            }
+            Ok(())
         }
-
-        self.stop(ctx, dev).await
+        .await;
+        dev.prepare_stateful_cleanup();
+        let cleanup = self.stop(ctx, dev).await;
+        finish_transaction(guard, operation, cleanup)
     }
 
     /// Read data from an I2C slave device.
@@ -331,24 +358,30 @@ impl I2cBus {
             return Ok(Vec::new());
         }
 
-        self.start(ctx, dev).await?;
-
-        // Address byte with read bit (bit 0 = 1)
-        let addr_byte = (address << 1) | 0x01;
-        if !self.write_byte(dev, addr_byte).await? {
-            self.stop(ctx, dev).await?;
-            return Err(Error::I2cNack("address not acknowledged"));
+        self.ensure_current(dev)?;
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
+        if let Err(error) = self.start(ctx, dev).await {
+            dev.prepare_stateful_cleanup();
+            let _ = self.stop(ctx, dev).await;
+            return Err(error);
         }
 
-        let mut result = Vec::with_capacity(len);
-        for i in 0..len {
-            let ack = i < len - 1; // ACK all bytes except the last one
-            let byte = self.read_byte(dev, ack).await?;
-            result.push(byte);
+        let operation = async {
+            let addr_byte = (address << 1) | 0x01;
+            if !self.write_byte(dev, addr_byte).await? {
+                return Err(Error::I2cNack("address not acknowledged"));
+            }
+            let mut result = Vec::with_capacity(len);
+            for i in 0..len {
+                result.push(self.read_byte(dev, i < len - 1).await?);
+            }
+            Ok(result)
         }
-
-        self.stop(ctx, dev).await?;
-        Ok(result)
+        .await;
+        dev.prepare_stateful_cleanup();
+        let cleanup = self.stop(ctx, dev).await;
+        finish_transaction(guard, operation, cleanup)
     }
 
     /// Write data then read data from an I2C slave (repeated START).
@@ -368,39 +401,75 @@ impl I2cBus {
                 "I2C address must be 7-bit (0x00-0x7F)",
             ));
         }
-        // Write phase
-        self.start(ctx, dev).await?;
-
-        let addr_w = (address << 1) & 0xFE;
-        if !self.write_byte(dev, addr_w).await? {
-            self.stop(ctx, dev).await?;
-            return Err(Error::I2cNack("address not acknowledged (write phase)"));
+        self.ensure_current(dev)?;
+        ctx.ensure_current(dev)?;
+        let guard = dev.begin_stateful_operation()?;
+        if let Err(error) = self.start(ctx, dev).await {
+            dev.prepare_stateful_cleanup();
+            let _ = self.stop(ctx, dev).await;
+            return Err(error);
         }
 
-        for &byte in write_data {
-            if !self.write_byte(dev, byte).await? {
-                self.stop(ctx, dev).await?;
-                return Err(Error::I2cNack("data byte not acknowledged"));
+        let operation = async {
+            let addr_w = (address << 1) & 0xFE;
+            if !self.write_byte(dev, addr_w).await? {
+                return Err(Error::I2cNack("address not acknowledged (write phase)"));
             }
+            for &byte in write_data {
+                if !self.write_byte(dev, byte).await? {
+                    return Err(Error::I2cNack("data byte not acknowledged"));
+                }
+            }
+
+            self.start(ctx, dev).await?;
+            let addr_r = (address << 1) | 0x01;
+            if !self.write_byte(dev, addr_r).await? {
+                return Err(Error::I2cNack("address not acknowledged (read phase)"));
+            }
+
+            let mut result = Vec::with_capacity(read_len);
+            for i in 0..read_len {
+                result.push(self.read_byte(dev, i < read_len - 1).await?);
+            }
+            Ok(result)
         }
+        .await;
+        dev.prepare_stateful_cleanup();
+        let cleanup = self.stop(ctx, dev).await;
+        finish_transaction(guard, operation, cleanup)
+    }
+}
 
-        // Repeated START for read phase
-        self.start(ctx, dev).await?;
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
-        let addr_r = (address << 1) | 0x01;
-        if !self.write_byte(dev, addr_r).await? {
-            self.stop(ctx, dev).await?;
-            return Err(Error::I2cNack("address not acknowledged (read phase)"));
-        }
+    use super::*;
 
-        let mut result = Vec::with_capacity(read_len);
-        for i in 0..read_len {
-            let ack = i < read_len - 1;
-            let byte = self.read_byte(dev, ack).await?;
-            result.push(byte);
-        }
+    #[test]
+    fn nack_with_successful_stop_does_not_require_recovery() {
+        let recovery_required = Arc::new(AtomicBool::new(false));
+        let guard = RecoveryGuard::new(Arc::clone(&recovery_required));
+        let result = finish_transaction::<()>(
+            guard,
+            Err(Error::I2cNack("address not acknowledged")),
+            Ok(()),
+        );
+        assert!(matches!(result, Err(Error::I2cNack(_))));
+        assert!(!recovery_required.load(Ordering::Acquire));
+    }
 
-        self.stop(ctx, dev).await?;
-        Ok(result)
+    #[test]
+    fn transfer_error_still_requires_recovery_after_stop() {
+        let recovery_required = Arc::new(AtomicBool::new(false));
+        let guard = RecoveryGuard::new(Arc::clone(&recovery_required));
+        let result = finish_transaction::<()>(
+            guard,
+            Err(Error::Timeout(core::time::Duration::from_millis(1))),
+            Ok(()),
+        );
+        assert!(matches!(result, Err(Error::Timeout(_))));
+        assert!(recovery_required.load(Ordering::Acquire));
     }
 }

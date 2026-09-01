@@ -62,6 +62,23 @@ pub enum Error {
     #[error("write returned zero bytes")]
     WriteZero,
 
+    /// A USB write completed without transferring the full submitted buffer.
+    #[error("short USB write: expected {expected} bytes, wrote {actual}")]
+    ShortWrite {
+        /// Number of bytes submitted.
+        expected: usize,
+        /// Number of bytes reported as transferred.
+        actual: usize,
+    },
+
+    /// A cancelled or failed stateful operation left device state uncertain.
+    #[error("device recovery is required before further I/O")]
+    RecoveryRequired,
+
+    /// An MPSSE context predates the most recent device recovery.
+    #[error("MPSSE context is invalid after recovery; initialize a new context")]
+    InvalidMpsseContext,
+
     /// USB reset failed.
     #[error("USB reset failed")]
     ResetFailed,

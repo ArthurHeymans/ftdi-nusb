@@ -190,20 +190,18 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
                 for op in operations.iter_mut() {
                     match op {
                         Operation::Read(buf) => {
-                            let data = spi.read(ctx, dev, buf.len()).await?;
+                            let data = spi.read_raw(dev, buf.len()).await?;
                             buf.copy_from_slice(&data);
                         }
                         Operation::Write(buf) => {
-                            spi.write(ctx, dev, buf).await?;
+                            spi.write_raw(dev, buf).await?;
                         }
                         Operation::Transfer(read, write) => {
-                            let data = spi.transfer(ctx, dev, write).await?;
-                            let copy_len = read.len().min(data.len());
-                            read[..copy_len].copy_from_slice(&data[..copy_len]);
+                            spi.transfer_into_raw(dev, read, write).await?;
                         }
                         Operation::TransferInPlace(buf) => {
-                            let data = spi.transfer(ctx, dev, buf).await?;
-                            buf.copy_from_slice(&data);
+                            let write = buf.to_vec();
+                            spi.transfer_into_raw(dev, buf, &write).await?;
                         }
                         Operation::DelayNs(ns) => {
                             crate::sleep_util::sleep(std::time::Duration::from_nanos(*ns as u64))
@@ -217,6 +215,10 @@ impl embedded_hal::spi::SpiDevice for FtdiSpiDevice {
 
             // Always deassert CS, even on error
             let cs_result = spi.cs_deassert(ctx, dev).await;
+
+            if result.is_err() || cs_result.is_err() {
+                dev.mark_recovery_required();
+            }
 
             // Return the first error
             result?;
