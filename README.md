@@ -144,16 +144,16 @@ handles this automatically via nusb's `detach_and_claim_interface()`.
 
 ## WASM / WebUSB Support
 
-The `wasm` feature builds for `wasm32-unknown-unknown` with WebUSB support,
-using the WebUSB backend included in upstream nusb.
+The `wasm32-unknown-unknown` target builds with WebUSB support using the WebUSB
+backend included in upstream nusb. The target automatically selects the async
+WASM API and browser dependencies.
 
-Build with default features disabled so the synchronous `std`/`is_sync` API is
-not enabled:
+Build for the WASM target:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 RUSTFLAGS='--cfg=web_sys_unstable_apis' \
-  cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
+  cargo build --target wasm32-unknown-unknown
 ```
 
 The `web_sys_unstable_apis` cfg is required because WebUSB bindings are still
@@ -177,12 +177,12 @@ dev.write_all(b"Hello from WebUSB!\r\n").await?;
 
 ## Feature Flags
 
-| Feature        | Description                                            |
-|----------------|--------------------------------------------------------|
-| `std` (default)| Native synchronous build (Linux/macOS/Windows)         |
-| `is_sync`      | Enabled automatically by `std`; makes all I/O blocking |
-| `wasm`         | Async WASM/WebUSB build                                |
-| `embedded-hal` | `embedded-hal` trait implementations                   |
+| Feature        | Description                          |
+|----------------|--------------------------------------|
+| `embedded-hal` | Native `embedded-hal` trait implementations |
+
+Native targets use the synchronous API. The `wasm32` target automatically uses
+the asynchronous WebUSB API.
 
 ## License
 
